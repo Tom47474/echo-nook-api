@@ -49,6 +49,8 @@ HTTP 路由 → 对话服务 → LLMProvider 接口 → 演示/真实模型适�
 
 响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。
 
+前端 `http-reply-provider.ts` 把本次用户输入放在 `message`，将已完成的消息放在 `history`；用户停止生成时会取消 HTTP 请求。
+
 客户端断开连接时，框架应取消流式任务。此阶段不保存历史，刷新后会话不会恢复。
 
 ## 使用火山方舟模型
