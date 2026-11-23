@@ -1,6 +1,6 @@
 # 服务端架构与目录说明
 
-EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。当前没有数据库与持久化，前端需在请求中传入近期对话历史。
+EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。本机 PostgreSQL 服务以及开发、测试数据库已经准备好，但代码尚未接入数据库、没有业务表和持久化，前端仍需在请求中传入近期对话历史。
 
 ## 目录与文件职责
 
@@ -18,9 +18,10 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/llm/openai_compatible.py` | 火山方舟 Chat Completions 流式调用与响应解析。 |
 | `app/llm/factory.py` | 根据配置选择演示或真实模型适配器。 |
 | `tests/` | 对话事件格式、方舟流解析和模型不可用时的错误处理测试。 |
-| `.env` | 本机环境配置，包含模型密钥；被 Git 忽略。 |
+| `.env` | 本机环境配置，包含模型密钥和数据库凭据；被 Git 忽略。 |
 | `.env.example` | 不含密钥的环境配置模板，默认使用演示模型。 |
 | `.gitignore` | 排除 `.env`、虚拟环境和 Python 缓存等本机文件。 |
+| `docs/database.md` | PostgreSQL 本地配置、连接、常用命令、备份、迁移约定和排错说明。 |
 | `pyproject.toml` | Python 版本、依赖和项目元数据。 |
 
 `__init__.py` 标记 Python 包。`.venv/` 是本机依赖环境。项目只使用 `.env` 作为本机配置文件；`.venv/` 和 `.env` 都被 Git 忽略。
@@ -33,7 +34,7 @@ HTTP 路由 → 对话服务 → LLMProvider 接口 → 演示/真实模型适�
               请求 Schema
 ```
 
-路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。以后增加数据库时，在 `app/db/` 建立连接与迁移，在 `app/conversations/` 增加持久化层；路由只传入会话 ID。
+路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。阶段二将在 `app/db/` 建立连接与迁移，在 `app/conversations/` 增加持久化层；路由只传入会话 ID。当前数据库准备情况和操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
 
 ## 当前接口契约
 

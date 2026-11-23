@@ -33,6 +33,9 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
 | `APP_NAME` | 接口文档中的服务名称。 |
 | `APP_ENV` | 环境标识，只接受 `development`、`test`、`production`，默认 `development`。 |
 | `FRONTEND_ORIGIN` | 允许跨域访问的前端地址，默认 `http://localhost:3000`。 |
+| `DATABASE_URL` | 应用数据库连接地址；本地开发使用 `echo_nook_dev`，将在 S2-1 接入代码。 |
+| `TEST_DATABASE_URL` | 数据库测试专用连接地址；必须指向 `echo_nook_test`。 |
+| `DATABASE_ECHO` | 后续控制 SQLAlchemy SQL 日志，默认 `false`。 |
 | `LLM_PROVIDER` | `demo` 为演示；`openai_compatible` 调用火山方舟。 |
 | `LLM_API_BASE_URL` | 方舟 API 地址，默认 `https://ark.cn-beijing.volces.com/api/v3`。 |
 | `LLM_API_KEY` | 火山方舟 API Key，只放在服务端 `.env`。 |
@@ -58,7 +61,7 @@ tests/                   基础测试
 docs/                    架构和目录说明
 ```
 
-每个文件的职责和扩展规则见 [服务端架构与目录说明](docs/backend-architecture.md)。前端在独立的 `echo-nook-web` 仓库，两者通过 HTTP 接口连接。
+每个文件的职责和扩展规则见 [服务端架构与目录说明](docs/backend-architecture.md)。数据库安装、连接、常用命令、备份和排错见 [PostgreSQL 本地开发与测试指南](docs/database.md)。前端在独立的 `echo-nook-web` 仓库，两者通过 HTTP 接口连接。
 
 ## 测试
 
@@ -66,7 +69,7 @@ docs/                    架构和目录说明
 .venv/bin/python -m unittest discover -s tests
 ```
 
-当前阶段没有数据库。加入持久化时再配置 PostgreSQL、SQLAlchemy 和 Alembic。
+本机 PostgreSQL 服务、开发库 `echo_nook_dev` 和测试库 `echo_nook_test` 已准备好，但当前代码尚未引入 SQLAlchemy、asyncpg 和 Alembic，也没有业务表。数据库连接和迁移会在阶段二 S2-1 接入；在此之前应用仍不会访问数据库。
 
 用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 

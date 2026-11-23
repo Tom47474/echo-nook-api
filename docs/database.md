@@ -1,0 +1,182 @@
+# PostgreSQL 本地开发与测试指南
+
+本文说明 EchoNook API 的本地 PostgreSQL 配置、日常使用和排错方式。命令默认在 macOS、Homebrew PostgreSQL 18 环境执行。
+
+## 当前状态
+
+截至 2026-11-23，本机数据库基础设施已准备完成：
+
+| 项目 | 当前状态 |
+| --- | --- |
+| PostgreSQL | Homebrew PostgreSQL 18.7，监听 `127.0.0.1:5432` |
+| 应用账号 | `echo_nook`，普通账号，不是超级用户 |
+| 开发数据库 | `echo_nook_dev` |
+| 测试数据库 | `echo_nook_test` |
+| 业务表 | 尚未创建 |
+| 代码接入 | 尚未引入 SQLAlchemy、asyncpg 和 Alembic |
+
+开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
+
+## 环境变量
+
+仓库只提交不含真实密码的 `.env.example`。本机连接信息应写入被 Git 忽略的 `.env`：
+
+```dotenv
+DATABASE_URL=postgresql+asyncpg://echo_nook:你的密码@127.0.0.1:5432/echo_nook_dev
+TEST_DATABASE_URL=postgresql+asyncpg://echo_nook:你的密码@127.0.0.1:5432/echo_nook_test
+DATABASE_ECHO=false
+```
+
+- `DATABASE_URL`：应用正常运行时使用的开发数据库。
+- `TEST_DATABASE_URL`：自动化数据库测试专用连接；测试执行破坏性清理前必须确认数据库名是 `echo_nook_test`。
+- `DATABASE_ECHO`：后续接入 SQLAlchemy 后控制是否输出 SQL。默认关闭，避免日志过于嘈杂或意外暴露业务数据。
+
+连接串中的特殊字符需要进行 URL 编码。不要把真实密码提交到 `.env.example`、文档、日志或 Git。当前代码尚未读取这些变量，因此现在写入连接串不会建立连接；S2-1 会增加配置校验、连接生命周期和迁移工具。
+
+测试服务器应使用独立的服务器端环境变量和数据库，不要复制本机 `.env`。正式环境将来同样使用独立凭据，并遵循最小权限原则。
+
+## 服务管理命令
+
+查看 Homebrew 服务：
+
+```bash
+brew services list
+```
+
+启动、停止或重启 PostgreSQL 18：
+
+```bash
+brew services start postgresql@18
+brew services stop postgresql@18
+brew services restart postgresql@18
+```
+
+检查服务是否接受连接：
+
+```bash
+pg_isready -h 127.0.0.1 -p 5432
+```
+
+查看 5432 端口监听进程：
+
+```bash
+lsof -nP -iTCP:5432 -sTCP:LISTEN
+```
+
+## 连接与检查
+
+连接开发库或测试库：
+
+```bash
+psql -h 127.0.0.1 -p 5432 -U echo_nook -d echo_nook_dev
+psql -h 127.0.0.1 -p 5432 -U echo_nook -d echo_nook_test
+```
+
+`psql` 内常用命令：
+
+```text
+\conninfo        显示当前连接
+\l               列出数据库
+\du              列出角色
+\dt              列出当前 schema 的表
+\d 表名          查看表结构
+\x               切换扩展显示
+\q               退出
+```
+
+检查当前数据库和账号：
+
+```sql
+SELECT current_database(), current_user;
+```
+
+不进入交互模式也可以执行检查：
+
+```bash
+psql -h 127.0.0.1 -p 5432 -U echo_nook -d echo_nook_dev \
+  -c 'SELECT current_database(), current_user;'
+```
+
+## 首次创建或重建账号和数据库
+
+以下命令只用于新的 PostgreSQL 实例，现有本机环境已经完成，不需要重复执行：
+
+```sql
+CREATE ROLE echo_nook WITH LOGIN PASSWORD '替换为强密码';
+CREATE DATABASE echo_nook_dev OWNER echo_nook;
+CREATE DATABASE echo_nook_test OWNER echo_nook;
+```
+
+可先以本机 PostgreSQL 管理账号连接默认数据库，再执行以上 SQL：
+
+```bash
+psql postgres
+```
+
+不要把应用账号设置为超级用户。修改密码可执行：
+
+```sql
+ALTER ROLE echo_nook WITH PASSWORD '替换为新的强密码';
+```
+
+修改密码后要同步更新本机 `.env`，并重启服务端。
+
+## 备份与恢复
+
+备份开发库：
+
+```bash
+pg_dump -h 127.0.0.1 -p 5432 -U echo_nook \
+  -d echo_nook_dev -Fc -f echo_nook_dev.dump
+```
+
+恢复前应创建一个新的空数据库，避免误覆盖正在使用的数据：
+
+```bash
+createdb -h 127.0.0.1 -p 5432 -U echo_nook echo_nook_restore
+pg_restore -h 127.0.0.1 -p 5432 -U echo_nook \
+  -d echo_nook_restore --no-owner echo_nook_dev.dump
+```
+
+`*.dump` 已被 Git 忽略，但备份仍可能包含真实对话内容，应按敏感数据保存。
+
+## 后续迁移命令
+
+S2-1 引入 Alembic、S2-2 建立模型后，预期使用以下命令；当前阶段尚不能执行：
+
+```bash
+.venv/bin/alembic upgrade head
+.venv/bin/alembic current
+.venv/bin/alembic history
+.venv/bin/alembic downgrade -1
+```
+
+生成迁移文件应在确认模型变更后执行，并人工审查生成内容：
+
+```bash
+.venv/bin/alembic revision --autogenerate -m "describe schema change"
+```
+
+迁移文件要提交 Git，数据库文件、密码和备份文件不要提交。测试和部署环境均通过 `alembic upgrade head` 重放同一套迁移，不能手工修改业务表来替代迁移。
+
+## 常见问题
+
+### `connection refused`
+
+先运行 `brew services list` 和 `pg_isready`。如果服务未启动，执行 `brew services start postgresql@18`。
+
+### `password authentication failed`
+
+确认连接串的账号是 `echo_nook`、密码正确，且特殊字符已经 URL 编码。不要通过打印完整连接串来排错。
+
+### `database does not exist`
+
+用 `psql postgres` 后执行 `\l`，确认 `echo_nook_dev` 和 `echo_nook_test` 存在且拼写一致。
+
+### 测试误连开发库
+
+数据库测试启动时必须检查连接目标；只要数据库名不是 `echo_nook_test` 就立即失败。任何清表、回滚或重建 schema 的操作都不得针对开发库执行。
+
+### 应用没有访问数据库
+
+这是当前阶段的预期行为。数据库服务和连接信息已准备好，但业务表、SQLAlchemy 会话、asyncpg 驱动和 Alembic 迁移将在阶段二 S2-1、S2-2 中接入。
