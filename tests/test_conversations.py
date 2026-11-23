@@ -42,6 +42,20 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("model_not_available", events[0])
 
+    def test_provider_timeout_has_retryable_error_code(self) -> None:
+        class TimeoutProvider:
+            async def stream_reply(self, messages, system_prompt):
+                request = httpx.Request("POST", "https://model.example/chat/completions")
+                raise httpx.ReadTimeout("timed out", request=request)
+                yield ""
+
+        async def collect() -> list[str]:
+            return [event async for event in stream_conversation(StreamMessageRequest(message="测试"), TimeoutProvider())]
+
+        events = asyncio.run(collect())
+        self.assertEqual(len(events), 1)
+        self.assertIn("provider_timeout", events[0])
+
     def test_closing_conversation_stream_closes_provider(self) -> None:
         class CancellableProvider:
             def __init__(self) -> None:

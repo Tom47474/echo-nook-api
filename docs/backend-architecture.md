@@ -50,7 +50,9 @@ HTTP 路由 → 对话服务 → LLMProvider 接口 → 演示/真实模型适�
 
 响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。
 
-前端 `http-reply-provider.ts` 把本次用户输入放在 `message`，将已完成的消息放在 `history`；用户停止生成时会取消 HTTP 请求。
+前端 `http-reply-provider.ts` 把本次用户输入放在 `message`，按完整回合构造最多 20 条 `history`。完成回复原样传入；失败或取消的部分回复带内部中断标记传入，空回复只保留对应用户消息。用户停止生成时会取消 HTTP 请求。
+
+`message.failed` 的 `code` 当前包括 `provider_not_configured`、`provider_auth_failed`、`model_not_available`、`provider_rate_limited`、`provider_timeout`、`provider_unreachable` 和 `generation_failed`。前端据此决定错误提示和是否提供重试；服务端错误文案不包含上游响应正文或密钥。
 
 客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。此阶段不保存历史，刷新后会话不会恢复。
 

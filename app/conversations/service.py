@@ -41,6 +41,12 @@ async def stream_conversation(
             code, message = "generation_failed", "模型服务暂时不可用，请稍后重试"
         yield encode_event("message.failed", {"code": code, "message": message})
         return
+    except httpx.TimeoutException:
+        yield encode_event("message.failed", {"code": "provider_timeout", "message": "模型服务响应超时，请稍后重试"})
+        return
+    except httpx.RequestError:
+        yield encode_event("message.failed", {"code": "provider_unreachable", "message": "无法连接模型服务，请稍后重试"})
+        return
     except Exception:
         yield encode_event("message.failed", {"code": "generation_failed", "message": "回复生成失败，请稍后重试"})
         return

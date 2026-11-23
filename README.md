@@ -22,7 +22,7 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
   -d '{"message":"你好","history":[]}'
 ```
 
-接口返回 `message.delta`、`message.completed` 或 `message.failed` 事件。当前本机 `.env` 会调用真实模型；改为 `LLM_PROVIDER=demo` 才会返回演示文本。前端已通过 `http-reply-provider.ts` 消费这些事件。请求中的 `history` 由客户端提供，尚未保存到数据库。
+接口返回 `message.delta`、`message.completed` 或 `message.failed` 事件。错误事件会区分配置缺失、鉴权失败、模型不可用、限流、超时、网络不可达和一般生成失败。当前本机 `.env` 会调用真实模型；改为 `LLM_PROVIDER=demo` 才会返回演示文本。前端已通过 `http-reply-provider.ts` 消费这些事件。请求中的 `history` 由客户端提供，尚未保存到数据库。
 
 ## 环境配置与火山方舟
 
