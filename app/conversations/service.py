@@ -20,6 +20,7 @@ def encode_event(name: str, data: dict[str, str]) -> str:
 async def stream_conversation(
     request: StreamMessageRequest, provider: LLMProvider
 ) -> AsyncIterator[str]:
+    # The provider receives the previous turns followed by the current question.
     messages = [*request.history, ChatMessage(role="user", content=request.message)]
     provider_stream = provider.stream_reply(messages, SYSTEM_PROMPT)
     try:
@@ -54,8 +55,7 @@ async def stream_conversation(
         yield encode_event("message.completed", {})
     finally:
         # Closing the browser response does not automatically close a nested
-        # async generator. Propagate the close so httpx can release the model
-        # provider's streaming response instead of continuing in the background.
+        # async generator. Propagate the close so httpx releases its response.
         close = getattr(provider_stream, "aclose", None)
         if close is not None:
             await close()

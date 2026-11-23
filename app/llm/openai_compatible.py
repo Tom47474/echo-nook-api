@@ -34,6 +34,8 @@ class OpenAICompatibleProvider:
         }
         timeout = httpx.Timeout(connect=10.0, read=120.0, write=20.0, pool=10.0)
         emitted_text = False
+        # Keep the upstream response inside the async context so cancellation
+        # closes the socket promptly instead of leaving model work in flight.
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",

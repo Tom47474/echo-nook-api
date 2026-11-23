@@ -12,8 +12,8 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | 尚未创建 |
-| 代码接入 | 尚未引入 SQLAlchemy、asyncpg 和 Alembic |
+| 业务表 | 尚未创建；当前只有 `alembic_version` 迁移版本表 |
+| 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
 
@@ -27,11 +27,11 @@ TEST_DATABASE_URL=postgresql+asyncpg://echo_nook:你的密码@127.0.0.1:5432/ech
 DATABASE_ECHO=false
 ```
 
-- `DATABASE_URL`：应用正常运行时使用的开发数据库。
-- `TEST_DATABASE_URL`：自动化数据库测试专用连接；测试执行破坏性清理前必须确认数据库名是 `echo_nook_test`。
-- `DATABASE_ECHO`：后续接入 SQLAlchemy 后控制是否输出 SQL。默认关闭，避免日志过于嘈杂或意外暴露业务数据。
+- `DATABASE_URL`：`development` 和 `production` 环境的数据库；本地开发指向 `echo_nook_dev`。
+- `TEST_DATABASE_URL`：`APP_ENV=test` 和数据库测试专用连接；代码强制数据库名以 `_test` 结尾。
+- `DATABASE_ECHO`：控制是否输出 SQLAlchemy SQL。默认关闭，避免日志过于嘈杂或意外暴露业务数据。
 
-连接串中的特殊字符需要进行 URL 编码。不要把真实密码提交到 `.env.example`、文档、日志或 Git。当前代码尚未读取这些变量，因此现在写入连接串不会建立连接；S2-1 会增加配置校验、连接生命周期和迁移工具。
+连接串中的特殊字符需要进行 URL 编码。不要把真实密码提交到 `.env.example`、文档、日志或 Git。服务端启动时读取当前环境的连接串并执行连接检查；失败时拒绝启动，关闭时释放 SQLAlchemy 连接池。配置使用 `SecretStr` 保存，避免常规日志和对象表示泄露完整连接串。
 
 测试服务器应使用独立的服务器端环境变量和数据库，不要复制本机 `.env`。正式环境将来同样使用独立凭据，并遵循最小权限原则。
 
@@ -140,15 +140,22 @@ pg_restore -h 127.0.0.1 -p 5432 -U echo_nook \
 
 `*.dump` 已被 Git 忽略，但备份仍可能包含真实对话内容，应按敏感数据保存。
 
-## 后续迁移命令
+## Alembic 迁移命令
 
-S2-1 引入 Alembic、S2-2 建立模型后，预期使用以下命令；当前阶段尚不能执行：
+依赖安装后，先把当前环境升级到最新数据库版本：
 
 ```bash
 .venv/bin/alembic upgrade head
 .venv/bin/alembic current
 .venv/bin/alembic history
 .venv/bin/alembic downgrade -1
+```
+
+`APP_ENV=test` 时 Alembic 自动使用 `TEST_DATABASE_URL`：
+
+```bash
+APP_ENV=test .venv/bin/alembic upgrade head
+APP_ENV=test .venv/bin/alembic current
 ```
 
 生成迁移文件应在确认模型变更后执行，并人工审查生成内容：
@@ -177,6 +184,6 @@ S2-1 引入 Alembic、S2-2 建立模型后，预期使用以下命令；当前�
 
 数据库测试启动时必须检查连接目标；只要数据库名不是 `echo_nook_test` 就立即失败。任何清表、回滚或重建 schema 的操作都不得针对开发库执行。
 
-### 应用没有访问数据库
+### 应用启动时数据库连接失败
 
-这是当前阶段的预期行为。数据库服务和连接信息已准备好，但业务表、SQLAlchemy 会话、asyncpg 驱动和 Alembic 迁移将在阶段二 S2-1、S2-2 中接入。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。虽然当前还没有会话和消息业务表，但应用启动时会执行数据库连通性检查。

@@ -9,6 +9,7 @@ EchoNook 虚拟陪伴频道的独立服务端仓库。基于 Python 3.14、FastA
 ```bash
 python3.14 -m venv .venv
 .venv/bin/python -m pip install -e .
+.venv/bin/alembic upgrade head
 .venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
 
@@ -33,9 +34,9 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
 | `APP_NAME` | 接口文档中的服务名称。 |
 | `APP_ENV` | 环境标识，只接受 `development`、`test`、`production`，默认 `development`。 |
 | `FRONTEND_ORIGIN` | 允许跨域访问的前端地址，默认 `http://localhost:3000`。 |
-| `DATABASE_URL` | 应用数据库连接地址；本地开发使用 `echo_nook_dev`，将在 S2-1 接入代码。 |
-| `TEST_DATABASE_URL` | 数据库测试专用连接地址；必须指向 `echo_nook_test`。 |
-| `DATABASE_ECHO` | 后续控制 SQLAlchemy SQL 日志，默认 `false`。 |
+| `DATABASE_URL` | 开发和正式环境的异步 PostgreSQL 连接；本地开发使用 `echo_nook_dev`。 |
+| `TEST_DATABASE_URL` | `APP_ENV=test` 和自动化数据库测试使用；数据库名必须以 `_test` 结尾。 |
+| `DATABASE_ECHO` | 是否输出 SQLAlchemy SQL 日志，默认 `false`。 |
 | `LLM_PROVIDER` | `demo` 为演示；`openai_compatible` 调用火山方舟。 |
 | `LLM_API_BASE_URL` | 方舟 API 地址，默认 `https://ark.cn-beijing.volces.com/api/v3`。 |
 | `LLM_API_KEY` | 火山方舟 API Key，只放在服务端 `.env`。 |
@@ -55,8 +56,10 @@ app/
 ├── api/                 HTTP 路由与总路由
 ├── conversations/       对话 Schema、提示词与事件流业务
 ├── core/                环境配置
+├── db/                  SQLAlchemy 基类、异步连接与请求会话
 ├── llm/                 模型接口、演示实现和火山方舟适配器
 └── main.py              应用入口与 CORS
+alembic/                  数据库迁移环境和版本脚本
 tests/                   基础测试
 docs/                    架构和目录说明
 ```
@@ -69,7 +72,7 @@ docs/                    架构和目录说明
 .venv/bin/python -m unittest discover -s tests
 ```
 
-本机 PostgreSQL 服务、开发库 `echo_nook_dev` 和测试库 `echo_nook_test` 已准备好，但当前代码尚未引入 SQLAlchemy、asyncpg 和 Alembic，也没有业务表。数据库连接和迁移会在阶段二 S2-1 接入；在此之前应用仍不会访问数据库。
+服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。当前只有 Alembic 版本表，业务表将在 S2-2 创建。
 
 用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 

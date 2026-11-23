@@ -14,6 +14,8 @@ async def stream_message(
     request: StreamMessageRequest, settings: Settings = Depends(get_settings)
 ) -> StreamingResponse:
     provider = create_llm_provider(settings)
+    # StreamingResponse forwards each generator chunk immediately. Compatible
+    # reverse proxies also use X-Accel-Buffering to avoid buffering the SSE body.
     return StreamingResponse(
         stream_conversation(request, provider),
         media_type="text/event-stream",
