@@ -14,6 +14,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/core/dependencies.py` | 从当前 FastAPI 实例读取实际配置，避免测试应用和默认应用混用设置。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
 | `app/conversations/models.py` | 会话和消息 ORM 模型、角色/状态定义、顺序与数据约束。 |
+| `app/conversations/persistence.py` | 包装模型 SSE，节流保存助手草稿、写入最终状态并恢复异常中断消息。 |
 | `app/conversations/repository.py` | 会话创建、稳定分页、消息游标查询和删除所需的 SQLAlchemy 查询。 |
 | `app/conversations/service.py` | 组装消息、设置角色提示词、把文本片段编码为 SSE 事件。 |
 | `app/db/base.py` | SQLAlchemy 声明式模型和 Alembic 共享的元数据基类。 |
@@ -52,7 +53,7 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `messages` 使用 UUIDv7 主键，通过外键归属会话，包含 `user`/`assistant` 角色、正文、生成状态、会话内顺序、可选错误码以及创建/更新时间。状态允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。数据库强制同一会话内 `sequence` 唯一且非负；删除会话会级联删除消息。
 
-当前会话接口能够创建、列出和删除会话，并查询已经存在的消息。新的流式接口会保存用户消息并恢复数据库上下文；助手消息的增量与最终状态仍留给 S2-5。
+当前会话接口能够创建、列出和删除会话，并查询已经存在的消息。新的流式接口会保存完整用户/助手回合、恢复数据库上下文，并持久化助手草稿和最终状态。
 
 ## 当前接口契约
 
@@ -66,7 +67,11 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。
 
-`POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话、分配唯一 `sequence`、保存并提交用户消息，然后读取当前消息之前的最近数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。失败或取消的历史助手正文会附加内部中断标记。会话不存在时返回结构化 404。
+`POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。失败或取消的历史助手正文会附加内部中断标记。会话不存在时返回结构化 404。
+
+新流首先发送 `message.started`，携带两条消息的 UUID 和 sequence，供前端把临时消息与数据库记录对齐。正文仍通过 `message.delta` 发送；`message.completed` 发送前保存完整正文和 `completed`，`message.failed` 发送前保存部分正文、`failed` 和结构化 `error_code`。客户端中断或外层生成器关闭时保存 `cancelled`。
+
+草稿不是逐 token 写库：收到新分片时，若累计新增 200 字符或距上次保存达到 1 秒，就使用独立短事务更新 `streaming` 正文。模型流期间不长期持有数据库连接。进程被强制终止时，可能丢失最近一个检查点之后的草稿；下次单进程应用启动会把遗留的 `assistant/streaming` 更新为 `failed`，错误码为 `generation_interrupted`。
 
 同一会话的并发发送通过 PostgreSQL 行锁串行分配消息顺序，提交用户消息后立即释放锁，不在模型流期间持有数据库事务。这样既避免 sequence 冲突，也避免慢模型长期占用锁。
 
@@ -89,7 +94,7 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。旧接口本身不保存历史；新接口当前保存用户问题，助手回复要等 S2-5 才能恢复。
 
-上面的无会话 ID 接口是旧版兼容接口，仍由客户端提供 `history`。新前端应使用带会话 ID 的接口；在 S2-5 完成前，新接口只持久化用户问题，不持久化助手回复。
+上面的无会话 ID 接口是旧版兼容接口，仍由客户端提供 `history`，也不会写入数据库。新前端应使用带会话 ID 的接口；阶段三完成切换后再规划移除旧接口。
 
 ## 环境隔离与调试
 

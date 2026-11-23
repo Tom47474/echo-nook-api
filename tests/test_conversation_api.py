@@ -214,9 +214,17 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [(item["sequence"], item["content"]) for item in stored.json()["items"]],
-            [(0, "数据库中的问题"), (1, "数据库中的回答"), (2, "本次问题")],
+            [
+                (0, "数据库中的问题"),
+                (1, "数据库中的回答"),
+                (2, "本次问题"),
+                (3, "新的回答"),
+            ],
         )
-        self.assertEqual(stored.json()["items"][-1]["status"], "completed")
+        self.assertEqual(
+            [item["status"] for item in stored.json()["items"][-2:]],
+            ["completed", "completed"],
+        )
 
     async def test_conversation_stream_rejects_client_history_and_missing_id(self) -> None:
         conversation = await self.create_conversation("拒绝客户端历史")
@@ -262,7 +270,11 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [item["sequence"] for item in stored.json()["items"]],
-            [0, 1],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [item["role"] for item in stored.json()["items"]],
+            ["user", "assistant", "user", "assistant"],
         )
 
 

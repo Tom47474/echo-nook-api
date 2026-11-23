@@ -77,12 +77,12 @@ class ConversationRepository:
         await self.session.flush()
         return True
 
-    async def append_user_message(
+    async def start_turn(
         self,
         conversation_id: UUID,
         content: str,
-    ) -> Message | None:
-        """锁定会话并追加用户消息，保证同一会话的 sequence 不冲突。"""
+    ) -> tuple[Message, Message] | None:
+        """在同一行锁事务中创建用户消息和助手流式占位消息。"""
         conversation = await self.session.scalar(
             select(Conversation)
             .where(Conversation.id == conversation_id)
@@ -96,19 +96,57 @@ class ConversationRepository:
                 Message.conversation_id == conversation_id
             )
         )
-        message = Message(
+        first_sequence = 0 if latest_sequence is None else latest_sequence + 1
+        user_message = Message(
             conversation_id=conversation_id,
             role=MessageRole.USER.value,
             content=content,
             status=MessageStatus.COMPLETED.value,
-            sequence=0 if latest_sequence is None else latest_sequence + 1,
+            sequence=first_sequence,
         )
-        self.session.add(message)
+        assistant_message = Message(
+            conversation_id=conversation_id,
+            role=MessageRole.ASSISTANT.value,
+            content="",
+            status=MessageStatus.STREAMING.value,
+            sequence=first_sequence + 1,
+        )
+        # 两条消息在释放行锁前一起 flush，防止并发回合交叉占用 sequence。
+        self.session.add_all((user_message, assistant_message))
         # 新消息应使会话回到列表顶部；更新时间由数据库生成。
         conversation.updated_at = func.now()
         await self.session.flush()
-        await self.session.refresh(message)
-        return message
+        await self.session.refresh(user_message)
+        await self.session.refresh(assistant_message)
+        return user_message, assistant_message
+
+    async def update_streaming_assistant(
+        self,
+        message_id: UUID,
+        *,
+        content: str,
+        status: MessageStatus,
+        error_code: str | None = None,
+    ) -> bool:
+        """更新仍处于 streaming 的助手消息，终态消息不会被重复覆盖。"""
+        message = await self.session.scalar(
+            select(Message)
+            .where(Message.id == message_id)
+            .with_for_update()
+        )
+        if message is None or message.status != MessageStatus.STREAMING.value:
+            return False
+
+        message.content = content
+        message.status = status.value
+        message.error_code = error_code
+        message.updated_at = func.now()
+        # 草稿和终态变化都会刷新会话时间，使活跃会话保持在列表顶部。
+        conversation = await self.session.get(Conversation, message.conversation_id)
+        if conversation is not None:
+            conversation.updated_at = func.now()
+        await self.session.flush()
+        return True
 
     async def load_model_history(
         self,

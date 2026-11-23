@@ -39,7 +39,9 @@ POST   /api/v1/conversations/{id}/messages:stream
 DELETE /api/v1/conversations/{id}
 ```
 
-会话列表按最近更新时间倒序排列；消息接口默认读取最新一页，但响应内始终按 `sequence` 正序排列。新的会话流式接口只接收本次 `message`：服务端先保存用户消息，再从数据库加载最近完整回合并调用模型，客户端不能提交 `history`。当前只保存用户消息，助手回复和最终状态将在 S2-5 落库。
+会话列表按最近更新时间倒序排列；消息接口默认读取最新一页，但响应内始终按 `sequence` 正序排列。新的会话流式接口只接收本次 `message`：服务端原子创建用户消息和助手占位消息，再从数据库加载最近完整回合并调用模型，客户端不能提交 `history`。助手正文会分段保存，完成、失败和用户停止都会写入最终状态。
+
+新接口首先发送 `message.started`，其中包含用户/助手消息 UUID 和 sequence；随后发送原有的 `message.delta`、`message.completed` 或 `message.failed`。处理新分片时，如果草稿累计新增 200 字符或距上次保存已达 1 秒，就执行一次检查点保存；最终事件前再完整保存。
 
 旧接口 `POST /api/v1/conversations/messages:stream` 暂时保留，供尚未升级的前端继续传入客户端历史；阶段三切换前端后再制定移除计划。
 
@@ -90,7 +92,7 @@ docs/                    架构和目录说明
 .venv/bin/python -m unittest discover -s tests
 ```
 
-服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。会话流式接口已保存用户问题并由服务端读取历史；助手回复及完成、失败、取消状态尚未落库。
+服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。会话流式接口已经持久化用户问题、助手草稿及 `completed`、`failed`、`cancelled` 最终状态。应用异常退出后遗留的 `streaming` 消息会在下次启动时恢复为 `failed`。
 
 用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.conversations.persistence import stream_persisted_conversation
 from app.conversations.repository import ConversationRepository
 from app.conversations.schemas import (
     ConversationCreate,
@@ -17,7 +18,8 @@ from app.conversations.schemas import (
 from app.conversations.service import build_database_history, stream_conversation
 from app.core.config import Settings
 from app.core.dependencies import get_app_settings
-from app.db.dependencies import get_db_session
+from app.db.dependencies import get_database_manager, get_db_session
+from app.db.session import DatabaseManager
 from app.llm.factory import create_llm_provider
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -107,23 +109,31 @@ async def stream_conversation_message(
     conversation_id: UUID,
     request: ConversationStreamRequest,
     session: AsyncSession = Depends(get_db_session),
+    manager: DatabaseManager = Depends(get_database_manager),
     settings: Settings = Depends(get_app_settings),
 ) -> StreamingResponse:
-    """保存当前问题、从数据库加载历史，再启动指定会话的模型流。"""
+    """创建完整回合、加载数据库历史，并持久化助手流式状态。"""
     repository = ConversationRepository(session)
-    user_message = await repository.append_user_message(
+    turn = await repository.start_turn(
         conversation_id,
         request.message,
     )
-    if user_message is None:
+    if turn is None:
         raise conversation_not_found()
+    user_message, assistant_message = turn
 
-    # 必须先提交用户消息再调用模型：即使模型配置错误或网络失败，用户问题
-    # 仍能在数据库中恢复。提交也会释放 append_user_message 获取的行锁。
+    # 必须先提交用户消息和助手占位消息再调用模型；提交会释放 start_turn
+    # 获取的行锁，后续慢模型不会阻塞同会话的其他数据库操作。
     await session.commit()
+    # SSE 在路由返回后才开始执行，因此先提取标量，不能让后台流访问稍后会
+    # 过期或脱离 Session 的 ORM 对象。
+    user_message_id = user_message.id
+    assistant_message_id = assistant_message.id
+    user_sequence = user_message.sequence
+    assistant_sequence = assistant_message.sequence
     stored_history = await repository.load_model_history(
         conversation_id,
-        before_sequence=user_message.sequence,
+        before_sequence=user_sequence,
     )
     history = build_database_history(stored_history)
     # SELECT 会自动开启只读事务；模型流开始前显式结束它，避免慢模型长时间
@@ -131,7 +141,16 @@ async def stream_conversation_message(
     await session.rollback()
     provider = create_llm_provider(settings)
     stream_request = StreamMessageRequest(message=request.message, history=history)
-    return create_streaming_response(stream_conversation(stream_request, provider))
+    events = stream_persisted_conversation(
+        stream_request,
+        provider,
+        manager,
+        user_message_id=user_message_id,
+        assistant_message_id=assistant_message_id,
+        user_sequence=user_sequence,
+        assistant_sequence=assistant_sequence,
+    )
+    return create_streaming_response(events)
 
 
 @router.post("/messages:stream")

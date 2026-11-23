@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import router
+from app.conversations.persistence import recover_interrupted_generations
 from app.core.config import Settings, get_settings
 from app.db.session import DatabaseManager
 
@@ -21,6 +22,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.database_manager = manager
     try:
         await manager.ping()
+        # 当前部署为单进程模型；启动时修复上次异常退出遗留的生成中消息。
+        await recover_interrupted_generations(manager)
         yield
     finally:
         await manager.dispose()

@@ -35,7 +35,9 @@
 
 在 DBeaver 中右键 `Schemas > public > Tables` 并选择刷新，即可看到 `alembic_version`、`conversations` 和 `messages`。表已经存在不代表助手回复已经完整保存；助手流式状态将在 S2-5 接入。
 
-S2-3 已接入会话创建、列表、删除和消息分页查询。S2-4 的会话流式接口会先写入 `user/completed` 消息，再读取此前历史调用模型；同一会话并发发送时通过会话行锁分配唯一 sequence。助手回复仍未写入，S2-5 将补齐 `streaming/completed/failed/cancelled` 状态；不要在 DBeaver 中手工插入数据来代替业务流程。
+阶段二现已完整接入会话创建、列表、删除、消息分页和流式持久化。一个回合会连续写入 `user/completed` 与 `assistant/streaming`，同一会话并发发送时通过会话行锁分配唯一 sequence。处理新分片时，助手正文按新增 200 字符或距上次保存 1 秒执行检查点，最终变为 `completed`、`failed` 或 `cancelled`；失败时 `error_code` 保存结构化原因。不要在 DBeaver 中手工修改状态来代替业务流程。
+
+应用启动时会把遗留的 `assistant/streaming` 消息标为 `failed`，并设置 `generation_interrupted`。该恢复策略基于当前单进程部署；未来若启用多进程或多实例，必须先增加生成租约或实例归属，避免新实例把其他实例仍在处理的消息误判为中断。
 
 ## 环境变量
 
