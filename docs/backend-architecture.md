@@ -1,6 +1,6 @@
 # 服务端架构与目录说明
 
-EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；当前没有业务表和对话持久化，前端仍需在请求中传入近期对话历史。
+EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；会话和消息表已经建立，但当前接口尚未读写它们，前端仍需在请求中传入近期对话历史。
 
 ## 目录与文件职责
 
@@ -12,6 +12,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/api/routes/conversations.py` | 对话 HTTP 接口，负责校验后的请求与流式响应封装。 |
 | `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置；`APP_ENV` 仅接受 development、test、production。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
+| `app/conversations/models.py` | 会话和消息 ORM 模型、角色/状态定义、顺序与数据约束。 |
 | `app/conversations/service.py` | 组装消息、设置角色提示词、把文本片段编码为 SSE 事件。 |
 | `app/db/base.py` | SQLAlchemy 声明式模型和 Alembic 共享的元数据基类。 |
 | `app/db/session.py` | 校验连接地址、创建异步 Engine/Session、连接检查及连接池释放。 |
@@ -41,7 +42,15 @@ FastAPI lifespan → DatabaseManager → async Engine → PostgreSQL
 HTTP 路由       → 请求级 AsyncSession ────────────────┘
 ```
 
-路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；业务层决定事务提交。S2-2 将在 `app/conversations/` 增加模型和持久化职责，路由只传入会话 ID。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
+路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；业务层决定事务提交。会话和消息模型位于 `app/conversations/models.py`，S2-3 将增加存储服务与管理接口，S2-4 再让流式接口按会话 ID 加载历史。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
+
+## 数据模型
+
+`conversations` 使用 UUIDv7 主键，包含标题、创建/更新时间以及可空的 `owner_id`。`owner_id` 只为 S5-1 身份与归属校验预留，目前没有用户表、外键或授权作用，开放给其他用户前必须补齐身份绑定和历史数据归属策略。
+
+`messages` 使用 UUIDv7 主键，通过外键归属会话，包含 `user`/`assistant` 角色、正文、生成状态、会话内顺序、可选错误码以及创建/更新时间。状态允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。数据库强制同一会话内 `sequence` 唯一且非负；删除会话会级联删除消息。
+
+当前数据表只是持久化基础，现有接口行为没有变化：尚不会创建会话、保存消息或恢复历史。
 
 ## 当前接口契约
 

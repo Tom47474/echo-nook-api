@@ -6,24 +6,26 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.conversations.models  # Register tables in Base.metadata for autogenerate.
 from app.core.config import get_settings
 from app.db.base import Base
+from app.db.session import validate_database_url
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import application model modules here as they are added so autogenerate can
-# compare their tables with PostgreSQL. S2-1 intentionally has no business models.
 target_metadata = Base.metadata
 
 
 def database_configuration() -> dict[str, str]:
     settings = get_settings()
+    url = settings.active_database_url()
+    validate_database_url(url, require_test_database=settings.app_env == "test")
     # set_main_option treats percent signs as interpolation, whereas passing a
     # copied configuration dictionary keeps URL-encoded credentials intact.
     section = dict(config.get_section(config.config_ini_section) or {})
-    section["sqlalchemy.url"] = settings.active_database_url()
+    section["sqlalchemy.url"] = url
     return section
 
 

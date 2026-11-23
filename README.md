@@ -72,7 +72,7 @@ docs/                    架构和目录说明
 .venv/bin/python -m unittest discover -s tests
 ```
 
-服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。当前只有 Alembic 版本表，业务表将在 S2-2 创建。
+服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。`conversations` 和 `messages` 表已经创建，但当前接口尚未读写它们，对话历史仍由客户端传入；接口接入从 S2-3 开始。
 
 用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 

@@ -12,10 +12,28 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | 尚未创建；当前只有 `alembic_version` 迁移版本表 |
+| 业务表 | `conversations`、`messages`；迁移版本为 `0002_conversation_messages` |
 | 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
+
+## 当前表结构
+
+`conversations` 保存会话容器：
+
+- UUIDv7 `id`、标题、创建时间和更新时间。
+- 可空 `owner_id` 为后续用户归属预留；当前不能作为权限控制依据。
+- `(owner_id, updated_at)` 索引用于后续按用户列出最近会话。
+
+`messages` 保存会话内消息：
+
+- UUIDv7 `id`、`conversation_id`、角色、正文、状态、顺序和时间。
+- `error_code` 保存可选的结构化生成错误类型。
+- 同一会话内 `sequence` 唯一且必须非负。
+- 角色只允许 `user`、`assistant`；状态只允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。
+- 删除会话时由 PostgreSQL 外键级联删除对应消息。
+
+在 DBeaver 中右键 `Schemas > public > Tables` 并选择刷新，即可看到 `alembic_version`、`conversations` 和 `messages`。表已经存在不代表当前聊天会自动保存；接口与存储服务将在 S2-3 至 S2-5 接入。
 
 ## 环境变量
 
@@ -186,4 +204,4 @@ APP_ENV=test .venv/bin/alembic current
 
 ### 应用启动时数据库连接失败
 
-先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。虽然当前还没有会话和消息业务表，但应用启动时会执行数据库连通性检查。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0002_conversation_messages`。
