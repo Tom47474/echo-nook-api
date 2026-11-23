@@ -26,12 +26,12 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
 
 ## 环境配置与火山方舟
 
-服务端只使用仓库根目录的 `.env`。该文件已被 Git 忽略；在本机编辑其中的配置即可。
+服务端只使用仓库根目录的 `.env`。该文件已被 Git 忽略；可复制 `.env.example` 后在本机编辑，示例文件不包含密钥。
 
 | 变量 | 当前值及用途 |
 | --- | --- |
 | `APP_NAME` | 接口文档中的服务名称。 |
-| `APP_ENV` | 环境标识，当前默认 `development`。 |
+| `APP_ENV` | 环境标识，只接受 `development`、`test`、`production`，默认 `development`。 |
 | `FRONTEND_ORIGIN` | 允许跨域访问的前端地址，默认 `http://localhost:3000`。 |
 | `LLM_PROVIDER` | `demo` 为演示；`openai_compatible` 调用火山方舟。 |
 | `LLM_API_BASE_URL` | 方舟 API 地址，默认 `https://ark.cn-beijing.volces.com/api/v3`。 |
@@ -67,6 +67,8 @@ docs/                    架构和目录说明
 ```
 
 当前阶段没有数据库。加入持久化时再配置 PostgreSQL、SQLAlchemy 和 Alembic。
+
+用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 
 ## 对话功能后续规划
 

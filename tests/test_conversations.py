@@ -42,6 +42,31 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("model_not_available", events[0])
 
+    def test_closing_conversation_stream_closes_provider(self) -> None:
+        class CancellableProvider:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def stream_reply(self, messages, system_prompt):
+                try:
+                    yield "第一段"
+                    await asyncio.sleep(60)
+                    yield "不会发送的第二段"
+                finally:
+                    # A client disconnect closes the response iterator. The
+                    # provider must see that close so its upstream connection
+                    # can leave its own async context promptly.
+                    self.closed = True
+
+        async def consume_then_disconnect() -> bool:
+            provider = CancellableProvider()
+            stream = stream_conversation(StreamMessageRequest(message="测试取消"), provider)
+            await anext(stream)
+            await stream.aclose()
+            return provider.closed
+
+        self.assertTrue(asyncio.run(consume_then_disconnect()))
+
 
 if __name__ == "__main__":
     unittest.main()

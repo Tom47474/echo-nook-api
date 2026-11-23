@@ -10,7 +10,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/api/router.py` | 汇总各业务路由。 |
 | `app/api/routes/health.py` | `/health` 健康检查。 |
 | `app/api/routes/conversations.py` | 对话 HTTP 接口，负责校验后的请求与流式响应封装。 |
-| `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置。 |
+| `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置；`APP_ENV` 仅接受 development、test、production。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
 | `app/conversations/service.py` | 组装消息、设置角色提示词、把文本片段编码为 SSE 事件。 |
 | `app/llm/base.py` | 模型适配器统一接口 `LLMProvider`。 |
@@ -19,6 +19,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/llm/factory.py` | 根据配置选择演示或真实模型适配器。 |
 | `tests/` | 对话事件格式、方舟流解析和模型不可用时的错误处理测试。 |
 | `.env` | 本机环境配置，包含模型密钥；被 Git 忽略。 |
+| `.env.example` | 不含密钥的环境配置模板，默认使用演示模型。 |
 | `.gitignore` | 排除 `.env`、虚拟环境和 Python 缓存等本机文件。 |
 | `pyproject.toml` | Python 版本、依赖和项目元数据。 |
 
@@ -51,7 +52,11 @@ HTTP 路由 → 对话服务 → LLMProvider 接口 → 演示/真实模型适�
 
 前端 `http-reply-provider.ts` 把本次用户输入放在 `message`，将已完成的消息放在 `history`；用户停止生成时会取消 HTTP 请求。
 
-客户端断开连接时，框架应取消流式任务。此阶段不保存历史，刷新后会话不会恢复。
+客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。此阶段不保存历史，刷新后会话不会恢复。
+
+## 环境隔离与调试
+
+`APP_ENV` 明确区分 `development`、`test` 和 `production`，非法值会在启动配置校验时失败。复制 `.env.example` 后按实际部署修改；`test` 分支部署使用 `APP_ENV=test`，正式环境必须使用 `APP_ENV=production`，并配置准确的 `FRONTEND_ORIGIN`。服务端目前不提供故障注入接口，所有阶段零故障模拟都位于前端浏览器内，避免正式环境意外暴露调试端点。
 
 ## 使用火山方舟模型
 

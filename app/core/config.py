@@ -8,7 +8,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "EchoNook API"
-    app_env: str = "development"
+    # Keep deployment behavior explicit; typos must fail during startup rather
+    # than silently selecting development behavior in a production process.
+    app_env: Literal["development", "test", "production"] = "development"
     frontend_origin: str = "http://localhost:3000"
     llm_provider: Literal["demo", "openai_compatible"] = "demo"
     llm_api_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"

@@ -21,8 +21,9 @@ async def stream_conversation(
     request: StreamMessageRequest, provider: LLMProvider
 ) -> AsyncIterator[str]:
     messages = [*request.history, ChatMessage(role="user", content=request.message)]
+    provider_stream = provider.stream_reply(messages, SYSTEM_PROMPT)
     try:
-        async for chunk in provider.stream_reply(messages, SYSTEM_PROMPT):
+        async for chunk in provider_stream:
             if chunk:
                 yield encode_event("message.delta", {"text": chunk})
     except ValueError:
@@ -43,4 +44,12 @@ async def stream_conversation(
     except Exception:
         yield encode_event("message.failed", {"code": "generation_failed", "message": "回复生成失败，请稍后重试"})
         return
-    yield encode_event("message.completed", {})
+    else:
+        yield encode_event("message.completed", {})
+    finally:
+        # Closing the browser response does not automatically close a nested
+        # async generator. Propagate the close so httpx can release the model
+        # provider's streaming response instead of continuing in the background.
+        close = getattr(provider_stream, "aclose", None)
+        if close is not None:
+            await close()
