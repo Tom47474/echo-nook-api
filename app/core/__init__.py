@@ -1,1 +1,1 @@
-"""Application-wide configuration and errors."""
+"""应用级配置和通用错误。"""

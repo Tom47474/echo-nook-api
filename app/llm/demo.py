@@ -6,6 +6,7 @@ from app.conversations.schemas import ChatMessage
 
 class DemoLLMProvider:
     async def stream_reply(self, messages: list[ChatMessage], system_prompt: str) -> AsyncIterator[str]:
+        """按固定小片段返回演示文本，用于不消耗模型额度的本地联调。"""
         question = next((item.content for item in reversed(messages) if item.role == "user"), "")
         reply = (
             f"我听到了你说的「{question}」。这是 EchoNook 服务端的演示回复。"

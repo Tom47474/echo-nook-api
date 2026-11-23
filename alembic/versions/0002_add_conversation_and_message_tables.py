@@ -1,4 +1,4 @@
-"""Add conversation and message tables.
+"""增加会话表和消息表。
 
 Revision ID: 0002_conversation_messages
 Revises: 0001_database_baseline
@@ -20,7 +20,7 @@ def upgrade() -> None:
     op.create_table(
         "conversations",
         sa.Column("id", sa.Uuid(), nullable=False),
-        # Ownership becomes mandatory when authentication is implemented in S5-1.
+        # S5-1 接入身份系统后，owner_id 将用于强制校验会话归属。
         sa.Column("owner_id", sa.Uuid(), nullable=True),
         sa.Column("title", sa.String(length=200), server_default="新对话", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),

@@ -6,7 +6,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-import app.conversations.models  # Register tables in Base.metadata for autogenerate.
+import app.conversations.models  # 注册模型，供 Alembic 自动比较数据库结构。
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import validate_database_url
@@ -22,8 +22,7 @@ def database_configuration() -> dict[str, str]:
     settings = get_settings()
     url = settings.active_database_url()
     validate_database_url(url, require_test_database=settings.app_env == "test")
-    # set_main_option treats percent signs as interpolation, whereas passing a
-    # copied configuration dictionary keeps URL-encoded credentials intact.
+    # set_main_option 会把百分号当作插值符；复制配置字典可以保留 URL 编码密码。
     section = dict(config.get_section(config.config_ini_section) or {})
     section["sqlalchemy.url"] = url
     return section

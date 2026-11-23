@@ -7,13 +7,13 @@ from app.db.session import DatabaseManager
 
 
 def get_database_manager(request: Request) -> DatabaseManager:
-    """Read the manager created by the FastAPI lifespan."""
+    """取得 FastAPI 生命周期创建的应用级数据库管理器。"""
     return request.app.state.database_manager
 
 
 async def get_db_session(
     manager: DatabaseManager = Depends(get_database_manager),
 ) -> AsyncIterator[AsyncSession]:
-    """Provide one transaction-capable session to a request handler."""
+    """向接口注入独立且支持事务的异步数据库 Session。"""
     async with manager.session() as session:
         yield session

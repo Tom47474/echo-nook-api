@@ -4,12 +4,43 @@ import unittest
 
 import httpx
 
+from app.conversations.models import Message, MessageRole, MessageStatus
 from app.conversations.schemas import StreamMessageRequest
-from app.conversations.service import stream_conversation
+from app.conversations.service import INTERRUPTED_SUFFIX, build_database_history, stream_conversation
 from app.llm.demo import DemoLLMProvider
 
 
 class ConversationTests(unittest.TestCase):
+    def test_database_history_keeps_whole_turns_and_marks_interruption(self) -> None:
+        messages: list[Message] = []
+        for turn in range(11):
+            messages.extend(
+                [
+                    Message(
+                        role=MessageRole.USER.value,
+                        content=f"问题 {turn}",
+                        status=MessageStatus.COMPLETED.value,
+                        sequence=turn * 2,
+                    ),
+                    Message(
+                        role=MessageRole.ASSISTANT.value,
+                        content=f"回答 {turn}",
+                        status=(
+                            MessageStatus.FAILED.value
+                            if turn == 10
+                            else MessageStatus.COMPLETED.value
+                        ),
+                        sequence=turn * 2 + 1,
+                    ),
+                ]
+            )
+
+        history = build_database_history(messages)
+
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0].content, "问题 1")
+        self.assertEqual(history[-1].content, "回答 10" + INTERRUPTED_SUFFIX)
+
     def test_demo_stream_contains_text_and_completion(self) -> None:
         async def collect() -> list[str]:
             request = StreamMessageRequest(message="你好")
@@ -22,7 +53,8 @@ class ConversationTests(unittest.TestCase):
 
     def test_event_payload_is_valid_json(self) -> None:
         async def collect() -> list[str]:
-            return [event async for event in stream_conversation(StreamMessageRequest(message="测试"), DemoLLMProvider())]
+            request = StreamMessageRequest(message="测试")
+            return [event async for event in stream_conversation(request, DemoLLMProvider())]
 
         for event in asyncio.run(collect()):
             json.loads(event.split("data: ", 1)[1].strip())
@@ -36,7 +68,8 @@ class ConversationTests(unittest.TestCase):
                 yield ""
 
         async def collect() -> list[str]:
-            return [event async for event in stream_conversation(StreamMessageRequest(message="测试"), UnavailableProvider())]
+            request = StreamMessageRequest(message="测试")
+            return [event async for event in stream_conversation(request, UnavailableProvider())]
 
         events = asyncio.run(collect())
         self.assertEqual(len(events), 1)
@@ -50,7 +83,8 @@ class ConversationTests(unittest.TestCase):
                 yield ""
 
         async def collect() -> list[str]:
-            return [event async for event in stream_conversation(StreamMessageRequest(message="测试"), TimeoutProvider())]
+            request = StreamMessageRequest(message="测试")
+            return [event async for event in stream_conversation(request, TimeoutProvider())]
 
         events = asyncio.run(collect())
         self.assertEqual(len(events), 1)
@@ -67,9 +101,8 @@ class ConversationTests(unittest.TestCase):
                     await asyncio.sleep(60)
                     yield "不会发送的第二段"
                 finally:
-                    # A client disconnect closes the response iterator. The
-                    # provider must see that close so its upstream connection
-                    # can leave its own async context promptly.
+                    # 客户端断开会关闭响应迭代器；Provider 必须收到关闭信号，
+                    # 才能及时退出上游连接的异步上下文。
                     self.closed = True
 
         async def consume_then_disconnect() -> bool:

@@ -33,9 +33,9 @@
 - 角色只允许 `user`、`assistant`；状态只允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。
 - 删除会话时由 PostgreSQL 外键级联删除对应消息。
 
-在 DBeaver 中右键 `Schemas > public > Tables` 并选择刷新，即可看到 `alembic_version`、`conversations` 和 `messages`。表已经存在不代表当前聊天会自动保存；流式读写将在 S2-4、S2-5 接入。
+在 DBeaver 中右键 `Schemas > public > Tables` 并选择刷新，即可看到 `alembic_version`、`conversations` 和 `messages`。表已经存在不代表助手回复已经完整保存；助手流式状态将在 S2-5 接入。
 
-S2-3 已接入会话创建、列表、删除和消息只读分页查询。流式生成仍未写入 `messages`，所以通过接口创建的新会话暂时没有消息；不要在 DBeaver 中手工插入数据来代替后续 S2-4、S2-5 的业务流程。
+S2-3 已接入会话创建、列表、删除和消息分页查询。S2-4 的会话流式接口会先写入 `user/completed` 消息，再读取此前历史调用模型；同一会话并发发送时通过会话行锁分配唯一 sequence。助手回复仍未写入，S2-5 将补齐 `streaming/completed/failed/cancelled` 状态；不要在 DBeaver 中手工插入数据来代替业务流程。
 
 ## 环境变量
 

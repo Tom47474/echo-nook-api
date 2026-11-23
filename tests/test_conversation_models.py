@@ -57,8 +57,8 @@ class ConversationModelTests(unittest.IsolatedAsyncioTestCase):
             ).all()
             self.assertEqual([message.content for message in messages], ["第一条", "第二条"])
 
-            # Execute a database-level delete so this verifies the foreign-key
-            # ON DELETE CASCADE rule rather than only the ORM relationship.
+            # 直接执行数据库删除，用于验证外键 ON DELETE CASCADE，
+            # 而不是只验证 ORM relationship 的级联行为。
             await session.execute(delete(Conversation).where(Conversation.id == conversation_id))
             await session.commit()
 

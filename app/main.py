@@ -11,7 +11,7 @@ from app.db.session import DatabaseManager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Verify PostgreSQL at startup and release its pool at shutdown."""
+    """启动时验证 PostgreSQL，关闭时释放应用持有的连接池。"""
     settings: Settings = app.state.settings
     manager = DatabaseManager(
         settings.active_database_url(),
@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """创建 FastAPI 应用，注册跨域、生命周期和全部业务路由。"""
     settings = settings or get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.state.settings = settings

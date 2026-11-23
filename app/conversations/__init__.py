@@ -1,1 +1,1 @@
-"""Conversation domain."""
+"""会话领域模块。"""

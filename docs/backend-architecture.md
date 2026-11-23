@@ -1,6 +1,6 @@
 # 服务端架构与目录说明
 
-EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；会话和消息表已经建立，但当前接口尚未读写它们，前端仍需在请求中传入近期对话历史。
+EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；会话管理和新流式接口已读写数据库，旧前端暂时继续使用客户端历史接口。
 
 ## 目录与文件职责
 
@@ -11,6 +11,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/api/routes/health.py` | `/health` 健康检查。 |
 | `app/api/routes/conversations.py` | 对话 HTTP 接口，负责校验后的请求与流式响应封装。 |
 | `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置；`APP_ENV` 仅接受 development、test、production。 |
+| `app/core/dependencies.py` | 从当前 FastAPI 实例读取实际配置，避免测试应用和默认应用混用设置。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
 | `app/conversations/models.py` | 会话和消息 ORM 模型、角色/状态定义、顺序与数据约束。 |
 | `app/conversations/repository.py` | 会话创建、稳定分页、消息游标查询和删除所需的 SQLAlchemy 查询。 |
@@ -43,7 +44,7 @@ FastAPI lifespan → DatabaseManager → async Engine → PostgreSQL
 HTTP 路由       → 请求级 AsyncSession ────────────────┘
 ```
 
-路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；变更接口显式提交，异常由 Session 上下文回滚。会话和消息模型位于 `app/conversations/models.py`，查询集中在 `repository.py`；S2-4 再让流式接口按会话 ID 加载历史。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
+路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；变更接口显式提交，异常由 Session 上下文回滚。会话和消息模型位于 `app/conversations/models.py`，查询集中在 `repository.py`；新流式接口先提交用户消息，再加载数据库历史并调用模型。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
 
 ## 数据模型
 
@@ -51,7 +52,7 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `messages` 使用 UUIDv7 主键，通过外键归属会话，包含 `user`/`assistant` 角色、正文、生成状态、会话内顺序、可选错误码以及创建/更新时间。状态允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。数据库强制同一会话内 `sequence` 唯一且非负；删除会话会级联删除消息。
 
-当前会话接口能够创建、列出和删除会话，并查询已经存在的消息；尚不会通过流式接口保存消息或恢复对话上下文。
+当前会话接口能够创建、列出和删除会话，并查询已经存在的消息。新的流式接口会保存用户消息并恢复数据库上下文；助手消息的增量与最终状态仍留给 S2-5。
 
 ## 当前接口契约
 
@@ -64,6 +65,10 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 `GET /api/v1/conversations/{id}/messages` 使用 `limit`（默认 50，最大 100）和可选 `before_sequence`。接口从最新消息向前取一页，但 `items` 始终按 `sequence` 正序返回；`has_more` 和 `next_before_sequence` 指示下一页。
 
 `DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。
+
+`POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话、分配唯一 `sequence`、保存并提交用户消息，然后读取当前消息之前的最近数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。失败或取消的历史助手正文会附加内部中断标记。会话不存在时返回结构化 404。
+
+同一会话的并发发送通过 PostgreSQL 行锁串行分配消息顺序，提交用户消息后立即释放锁，不在模型流期间持有数据库事务。这样既避免 sequence 冲突，也避免慢模型长期占用锁。
 
 当前没有身份认证，会话列表不会按用户过滤；`owner_id` 也不构成授权。这些接口只能用于当前受控开发阶段，不能在完成 S5-1 前作为多用户安全接口开放。
 
@@ -82,7 +87,9 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `message.failed` 的 `code` 当前包括 `provider_not_configured`、`provider_auth_failed`、`model_not_available`、`provider_rate_limited`、`provider_timeout`、`provider_unreachable` 和 `generation_failed`。前端据此决定错误提示和是否提供重试；服务端错误文案不包含上游响应正文或密钥。
 
-客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。此阶段不保存历史，刷新后会话不会恢复。
+客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。旧接口本身不保存历史；新接口当前保存用户问题，助手回复要等 S2-5 才能恢复。
+
+上面的无会话 ID 接口是旧版兼容接口，仍由客户端提供 `history`。新前端应使用带会话 ID 的接口；在 S2-5 完成前，新接口只持久化用户问题，不持久化助手回复。
 
 ## 环境隔离与调试
 

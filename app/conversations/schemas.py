@@ -17,14 +17,21 @@ class StreamMessageRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
 
 
+class ConversationStreamRequest(BaseModel):
+    """新流式接口只接收本次输入，历史必须由服务端数据库提供。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=4000)
+
+
 class ConversationCreate(BaseModel):
     title: str = Field(default="新对话", min_length=1, max_length=200)
 
     @field_validator("title")
     @classmethod
     def title_must_contain_text(cls, value: str) -> str:
-        # Normalize at the HTTP boundary so titles have one consistent form in
-        # storage regardless of leading or trailing spaces from a client.
+        # 在 HTTP 边界统一清理标题，避免客户端空格差异进入数据库。
         value = value.strip()
         if not value:
             raise ValueError("标题不能为空")

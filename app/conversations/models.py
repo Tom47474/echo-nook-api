@@ -33,10 +33,11 @@ class MessageStatus(StrEnum):
 
 
 class Conversation(Base):
+    """会话容器，保存标题、归属预留字段和消息集合。"""
+
     __tablename__ = "conversations"
     __table_args__ = (
-        # owner_id is nullable until identity is introduced in S5-1. Keeping it
-        # now avoids redesigning the conversation boundary when ownership lands.
+        # owner_id 在 S5-1 接入身份前允许为空，提前预留可避免后续重构会话边界。
         Index("ix_conversations_owner_updated_at", "owner_id", "updated_at"),
     )
 
@@ -68,6 +69,8 @@ class Conversation(Base):
 
 
 class Message(Base):
+    """按 sequence 排列的用户或助手消息及其生成状态。"""
+
     __tablename__ = "messages"
     __table_args__ = (
         CheckConstraint("role IN ('user', 'assistant')", name="ck_messages_role"),

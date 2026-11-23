@@ -1,4 +1,4 @@
-"""Establish the database migration baseline.
+"""建立数据库迁移基线。
 
 Revision ID: 0001_database_baseline
 Revises: None
@@ -14,8 +14,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Business tables are introduced in S2-2; this revision proves that the
-    # migration chain can be reproduced before schema design begins.
+    # 业务表由 S2-2 引入；空基线用于先验证迁移链可以重复执行。
     pass
 
 

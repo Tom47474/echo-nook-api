@@ -1,6 +1,6 @@
-"""Volcengine Ark Chat Completions streaming adapter.
+"""火山方舟 Chat Completions 流式适配器。
 
-This provider keeps Ark-specific request and response details out of the API layer.
+供应商请求和响应解析集中在此处，避免 API 路由依赖方舟协议细节。
 """
 
 import json
@@ -16,7 +16,12 @@ class OpenAICompatibleProvider:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    async def stream_reply(self, messages: list[ChatMessage], system_prompt: str) -> AsyncIterator[str]:
+    async def stream_reply(
+        self,
+        messages: list[ChatMessage],
+        system_prompt: str,
+    ) -> AsyncIterator[str]:
+        """调用方舟流式接口，只向业务层产出最终回答正文。"""
         if not self.settings.llm_api_key:
             raise ValueError("LLM_API_KEY 未配置")
         if not self.settings.llm_model.strip():
@@ -34,8 +39,8 @@ class OpenAICompatibleProvider:
         }
         timeout = httpx.Timeout(connect=10.0, read=120.0, write=20.0, pool=10.0)
         emitted_text = False
-        # Keep the upstream response inside the async context so cancellation
-        # closes the socket promptly instead of leaving model work in flight.
+        # 上游响应必须处于异步上下文内，取消时才能及时关闭连接，
+        # 避免模型请求在客户端离开后继续占用资源。
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
@@ -59,7 +64,7 @@ class OpenAICompatibleProvider:
                     if not event.get("choices"):
                         continue
                     content = event["choices"][0].get("delta", {}).get("content")
-                    # Kimi may stream reasoning_content first. Only the final answer is shown.
+                    # Kimi 可能先返回 reasoning_content；界面只展示最终正文 content。
                     if isinstance(content, str) and content:
                         emitted_text = True
                         yield content

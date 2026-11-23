@@ -17,6 +17,8 @@ python3.14 -m venv .venv
 
 ## 试用流式接口
 
+以下是当前前端仍在使用的旧兼容接口，历史由客户端传入：
+
 ```bash
 curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
   -H 'Content-Type: application/json' \
@@ -33,10 +35,13 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
 POST   /api/v1/conversations
 GET    /api/v1/conversations?offset=0&limit=20
 GET    /api/v1/conversations/{id}/messages?limit=50&before_sequence=100
+POST   /api/v1/conversations/{id}/messages:stream
 DELETE /api/v1/conversations/{id}
 ```
 
-会话列表按最近更新时间倒序排列；消息接口默认读取最新一页，但响应内始终按 `sequence` 正序排列。当前还没有通过 HTTP 新增消息的普通接口，流式接口也尚未绑定会话 ID，因此新建会话后消息列表为空是预期行为。S2-4、S2-5 将接入流式对话和消息保存。
+会话列表按最近更新时间倒序排列；消息接口默认读取最新一页，但响应内始终按 `sequence` 正序排列。新的会话流式接口只接收本次 `message`：服务端先保存用户消息，再从数据库加载最近完整回合并调用模型，客户端不能提交 `history`。当前只保存用户消息，助手回复和最终状态将在 S2-5 落库。
+
+旧接口 `POST /api/v1/conversations/messages:stream` 暂时保留，供尚未升级的前端继续传入客户端历史；阶段三切换前端后再制定移除计划。
 
 ## 环境配置与火山方舟
 
@@ -85,7 +90,7 @@ docs/                    架构和目录说明
 .venv/bin/python -m unittest discover -s tests
 ```
 
-服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。会话管理接口已经读写 `conversations`，消息查询接口读取 `messages`；现有流式接口仍由客户端传入历史，尚未保存生成消息。
+服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。会话流式接口已保存用户问题并由服务端读取历史；助手回复及完成、失败、取消状态尚未落库。
 
 用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 

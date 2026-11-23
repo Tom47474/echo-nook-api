@@ -13,11 +13,11 @@ from sqlalchemy.ext.asyncio import (
 
 
 def validate_database_url(url: str, *, require_test_database: bool = False) -> None:
-    """Reject unsupported drivers and unsafe test-database targets."""
+    """校验异步驱动，并阻止测试流程误连非测试数据库。"""
     try:
         parsed = make_url(url)
     except (ArgumentError, ValueError):
-        # Do not include the malformed URL because it may contain a password.
+        # 异常中不能包含原始地址，否则可能把数据库密码写入日志。
         raise ValueError("数据库连接地址格式无效") from None
     if parsed.drivername != "postgresql+asyncpg":
         raise ValueError("数据库连接必须使用 postgresql+asyncpg 驱动")
@@ -28,7 +28,7 @@ def validate_database_url(url: str, *, require_test_database: bool = False) -> N
 
 
 class DatabaseManager:
-    """Own the async engine and session factory for one FastAPI application."""
+    """管理单个 FastAPI 应用使用的异步引擎和 Session 工厂。"""
 
     def __init__(
         self,
@@ -50,13 +50,13 @@ class DatabaseManager:
         )
 
     async def ping(self) -> None:
-        """Fail application startup early when PostgreSQL is unavailable."""
+        """执行最小查询，使 PostgreSQL 不可用时在应用启动阶段立即失败。"""
         async with self.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        """Yield one request-scoped session and roll back failed work."""
+        """提供一次请求范围的 Session，并在业务异常时回滚未提交事务。"""
         async with self.session_factory() as session:
             try:
                 yield session
@@ -65,5 +65,5 @@ class DatabaseManager:
                 raise
 
     async def dispose(self) -> None:
-        """Close pooled connections during application shutdown."""
+        """应用关闭时释放连接池中的数据库连接。"""
         await self.engine.dispose()

@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 from uuid import UUID, uuid4
+from unittest.mock import patch
 
 import httpx
 from sqlalchemy import delete, select
@@ -28,8 +30,7 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         self.created_ids: list[UUID] = []
 
     async def asyncTearDown(self) -> None:
-        # Cleanup only rows created by this test so a developer's other test data
-        # is not removed when the suite runs against the shared local test DB.
+        # 只清理本测试创建的数据，避免运行测试时删除开发者保留的其他测试数据。
         if self.created_ids:
             async with self.app.state.database_manager.session() as session:
                 await session.execute(
@@ -144,6 +145,125 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
             params={"offset": -1, "limit": 101},
         )
         self.assertEqual(response.status_code, 422)
+
+    async def test_conversation_stream_saves_user_and_uses_database_history(self) -> None:
+        conversation = await self.create_conversation("服务端历史")
+        conversation_id = UUID(conversation["id"])
+        async with self.app.state.database_manager.session() as session:
+            session.add_all(
+                [
+                    Message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.USER.value,
+                        content="数据库中的问题",
+                        status=MessageStatus.COMPLETED.value,
+                        sequence=0,
+                    ),
+                    Message(
+                        conversation_id=conversation_id,
+                        role=MessageRole.ASSISTANT.value,
+                        content="数据库中的回答",
+                        status=MessageStatus.COMPLETED.value,
+                        sequence=1,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        captured_messages = []
+        checked_out_connections = []
+        captured_environments = []
+        engine = self.app.state.database_manager.engine
+
+        class CapturingProvider:
+            async def stream_reply(self, messages, system_prompt):
+                captured_messages.extend(messages)
+                # Provider 开始工作时，历史查询事务应已释放数据库连接。
+                checked_out_connections.append(engine.pool.checkedout())
+                yield "新的回答"
+
+        def create_provider(settings):
+            captured_environments.append(settings.app_env)
+            return CapturingProvider()
+
+        with patch(
+            "app.api.routes.conversations.create_llm_provider",
+            side_effect=create_provider,
+        ):
+            response = await self.client.post(
+                f"/api/v1/conversations/{conversation_id}/messages:stream",
+                json={"message": "本次问题"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: message.delta", response.text)
+        self.assertIn("event: message.completed", response.text)
+        self.assertEqual(checked_out_connections, [0])
+        self.assertEqual(captured_environments, ["test"])
+        self.assertEqual(
+            [(item.role, item.content) for item in captured_messages],
+            [
+                ("user", "数据库中的问题"),
+                ("assistant", "数据库中的回答"),
+                ("user", "本次问题"),
+            ],
+        )
+
+        stored = await self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages"
+        )
+        self.assertEqual(
+            [(item["sequence"], item["content"]) for item in stored.json()["items"]],
+            [(0, "数据库中的问题"), (1, "数据库中的回答"), (2, "本次问题")],
+        )
+        self.assertEqual(stored.json()["items"][-1]["status"], "completed")
+
+    async def test_conversation_stream_rejects_client_history_and_missing_id(self) -> None:
+        conversation = await self.create_conversation("拒绝客户端历史")
+        response = await self.client.post(
+            f"/api/v1/conversations/{conversation['id']}/messages:stream",
+            json={"message": "新问题", "history": [{"role": "user", "content": "伪造历史"}]},
+        )
+        self.assertEqual(response.status_code, 422)
+
+        response = await self.client.post(
+            f"/api/v1/conversations/{uuid4()}/messages:stream",
+            json={"message": "不存在的会话"},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"]["code"], "conversation_not_found")
+
+    async def test_concurrent_user_messages_receive_unique_sequences(self) -> None:
+        conversation = await self.create_conversation("并发顺序")
+        conversation_id = UUID(conversation["id"])
+
+        class ImmediateProvider:
+            async def stream_reply(self, messages, system_prompt):
+                yield "完成"
+
+        with patch(
+            "app.api.routes.conversations.create_llm_provider",
+            return_value=ImmediateProvider(),
+        ):
+            responses = await asyncio.gather(
+                self.client.post(
+                    f"/api/v1/conversations/{conversation_id}/messages:stream",
+                    json={"message": "并发问题 A"},
+                ),
+                self.client.post(
+                    f"/api/v1/conversations/{conversation_id}/messages:stream",
+                    json={"message": "并发问题 B"},
+                ),
+            )
+
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        stored = await self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages"
+        )
+        self.assertEqual(
+            [item["sequence"] for item in stored.json()["items"]],
+            [0, 1],
+        )
 
 
 if __name__ == "__main__":

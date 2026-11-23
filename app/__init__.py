@@ -1,1 +1,1 @@
-"""EchoNook API package."""
+"""EchoNook 服务端应用包。"""

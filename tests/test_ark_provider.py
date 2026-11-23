@@ -41,7 +41,11 @@ class ArkProviderTests(unittest.TestCase):
                 "app.llm.openai_compatible.httpx.AsyncClient",
                 side_effect=lambda **kwargs: original_client(transport=transport, **kwargs),
             ):
-                return [part async for part in provider.stream_reply([ChatMessage(role="user", content="你好")], "be helpful")]
+                messages = [ChatMessage(role="user", content="你好")]
+                return [
+                    part
+                    async for part in provider.stream_reply(messages, "be helpful")
+                ]
 
         self.assertEqual(asyncio.run(collect()), ["你好", "，世界"])
         self.assertEqual(len(captured), 1)
