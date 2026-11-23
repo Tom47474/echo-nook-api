@@ -25,6 +25,19 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
 
 接口返回 `message.delta`、`message.completed` 或 `message.failed` 事件。错误事件会区分配置缺失、鉴权失败、模型不可用、限流、超时、网络不可达和一般生成失败。当前本机 `.env` 会调用真实模型；改为 `LLM_PROVIDER=demo` 才会返回演示文本。前端已通过 `http-reply-provider.ts` 消费这些事件。请求中的 `history` 由客户端提供，尚未保存到数据库。
 
+## 会话管理接口
+
+阶段 S2-3 已提供服务端会话容器管理和历史消息查询：
+
+```text
+POST   /api/v1/conversations
+GET    /api/v1/conversations?offset=0&limit=20
+GET    /api/v1/conversations/{id}/messages?limit=50&before_sequence=100
+DELETE /api/v1/conversations/{id}
+```
+
+会话列表按最近更新时间倒序排列；消息接口默认读取最新一页，但响应内始终按 `sequence` 正序排列。当前还没有通过 HTTP 新增消息的普通接口，流式接口也尚未绑定会话 ID，因此新建会话后消息列表为空是预期行为。S2-4、S2-5 将接入流式对话和消息保存。
+
 ## 环境配置与火山方舟
 
 服务端只使用仓库根目录的 `.env`。该文件已被 Git 忽略；可复制 `.env.example` 后在本机编辑，示例文件不包含密钥。
@@ -72,7 +85,7 @@ docs/                    架构和目录说明
 .venv/bin/python -m unittest discover -s tests
 ```
 
-服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。`conversations` 和 `messages` 表已经创建，但当前接口尚未读写它们，对话历史仍由客户端传入；接口接入从 S2-3 开始。
+服务端已接入 SQLAlchemy、asyncpg 和 Alembic。启动时会连接并检查当前环境的数据库，关闭时释放连接池；数据库不可用或连接配置缺失时启动失败。会话管理接口已经读写 `conversations`，消息查询接口读取 `messages`；现有流式接口仍由客户端传入历史，尚未保存生成消息。
 
 用户停止或浏览器断开 SSE 时，服务端会主动关闭模型 Provider 的异步流并释放上游响应上下文。自动化测试覆盖该关闭传播；模型供应商是否立即停止计算或计费仍取决于供应商实现。
 

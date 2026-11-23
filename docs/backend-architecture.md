@@ -13,6 +13,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置；`APP_ENV` 仅接受 development、test、production。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
 | `app/conversations/models.py` | 会话和消息 ORM 模型、角色/状态定义、顺序与数据约束。 |
+| `app/conversations/repository.py` | 会话创建、稳定分页、消息游标查询和删除所需的 SQLAlchemy 查询。 |
 | `app/conversations/service.py` | 组装消息、设置角色提示词、把文本片段编码为 SSE 事件。 |
 | `app/db/base.py` | SQLAlchemy 声明式模型和 Alembic 共享的元数据基类。 |
 | `app/db/session.py` | 校验连接地址、创建异步 Engine/Session、连接检查及连接池释放。 |
@@ -42,7 +43,7 @@ FastAPI lifespan → DatabaseManager → async Engine → PostgreSQL
 HTTP 路由       → 请求级 AsyncSession ────────────────┘
 ```
 
-路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；业务层决定事务提交。会话和消息模型位于 `app/conversations/models.py`，S2-3 将增加存储服务与管理接口，S2-4 再让流式接口按会话 ID 加载历史。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
+路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；变更接口显式提交，异常由 Session 上下文回滚。会话和消息模型位于 `app/conversations/models.py`，查询集中在 `repository.py`；S2-4 再让流式接口按会话 ID 加载历史。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
 
 ## 数据模型
 
@@ -50,11 +51,21 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `messages` 使用 UUIDv7 主键，通过外键归属会话，包含 `user`/`assistant` 角色、正文、生成状态、会话内顺序、可选错误码以及创建/更新时间。状态允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。数据库强制同一会话内 `sequence` 唯一且非负；删除会话会级联删除消息。
 
-当前数据表只是持久化基础，现有接口行为没有变化：尚不会创建会话、保存消息或恢复历史。
+当前会话接口能够创建、列出和删除会话，并查询已经存在的消息；尚不会通过流式接口保存消息或恢复对话上下文。
 
 ## 当前接口契约
 
 `GET /health` 返回 `{"status":"ok"}`。
+
+`POST /api/v1/conversations` 接受可选的 `title`，创建成功返回 201 和会话对象。标题默认“新对话”，会去除首尾空格，长度为 1 至 200。
+
+`GET /api/v1/conversations` 使用 `offset`（默认 0）和 `limit`（默认 20，最大 100），返回 `items`、`total`、`offset`、`limit`。结果按 `updated_at DESC, id DESC` 排列，UUID 作为时间相同情况下的稳定排序键。
+
+`GET /api/v1/conversations/{id}/messages` 使用 `limit`（默认 50，最大 100）和可选 `before_sequence`。接口从最新消息向前取一页，但 `items` 始终按 `sequence` 正序返回；`has_more` 和 `next_before_sequence` 指示下一页。
+
+`DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。
+
+当前没有身份认证，会话列表不会按用户过滤；`owner_id` 也不构成授权。这些接口只能用于当前受控开发阶段，不能在完成 S5-1 前作为多用户安全接口开放。
 
 `POST /api/v1/conversations/messages:stream` 接受：
 
