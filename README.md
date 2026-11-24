@@ -17,15 +17,23 @@ python3.14 -m venv .venv
 
 ## 试用流式接口
 
-以下是当前前端仍在使用的旧兼容接口，历史由客户端传入：
+先创建会话，并从响应中复制 `id`：
 
 ```bash
-curl -N -X POST http://localhost:8000/api/v1/conversations/messages:stream \
+curl -X POST http://localhost:8000/api/v1/conversations \
   -H 'Content-Type: application/json' \
-  -d '{"message":"你好","history":[]}'
+  -d '{"title":"命令行测试"}'
 ```
 
-接口返回 `message.delta`、`message.completed` 或 `message.failed` 事件。错误事件会区分配置缺失、鉴权失败、模型不可用、限流、超时、网络不可达和一般生成失败。当前本机 `.env` 会调用真实模型；改为 `LLM_PROVIDER=demo` 才会返回演示文本。前端已通过 `http-reply-provider.ts` 消费这些事件。请求中的 `history` 由客户端提供，尚未保存到数据库。
+再把下面的 `{conversation_id}` 替换为该 ID：
+
+```bash
+curl -N -X POST http://localhost:8000/api/v1/conversations/{conversation_id}/messages:stream \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"你好"}'
+```
+
+接口先返回 `message.started`，再返回 `message.delta`、`message.completed` 或 `message.failed`。错误事件会区分配置缺失、鉴权失败、模型不可用、限流、超时、网络不可达和一般生成失败。`LLM_PROVIDER=openai_compatible` 调用已配置的真实模型，`LLM_PROVIDER=demo` 返回演示文本；实际使用哪一种取决于启动时读取的环境配置。前端已通过 `http-reply-provider.ts` 使用该持久化接口，历史由服务端数据库提供。
 
 ## 会话管理接口
 
@@ -43,7 +51,7 @@ DELETE /api/v1/conversations/{id}
 
 新接口首先发送 `message.started`，其中包含用户/助手消息 UUID 和 sequence；随后发送原有的 `message.delta`、`message.completed` 或 `message.failed`。处理新分片时，如果草稿累计新增 200 字符或距上次保存已达 1 秒，就执行一次检查点保存；最终事件前再完整保存。
 
-旧接口 `POST /api/v1/conversations/messages:stream` 暂时保留，供尚未升级的前端继续传入客户端历史；阶段三切换前端后再制定移除计划。
+旧接口 `POST /api/v1/conversations/messages:stream` 暂时保留用于兼容和独立调试；当前前端已经不再调用它。旧接口不会持久化消息，后续在完成兼容性评估后移除。
 
 ## 环境配置与火山方舟
 
@@ -63,7 +71,7 @@ DELETE /api/v1/conversations/{id}
 | `LLM_MODEL` | 要调用的模型 ID 或推理接入点 ID，必须在 `.env` 中填写；代码不预设模型名称。 |
 | `LLM_REASONING_EFFORT` | `low`、`high` 或 `max`；默认 `low`，适合交互式聊天。 |
 
-当前本机 `.env` 使用 `openai_compatible` 调用方舟的 `/chat/completions` 流式接口。适配器只转发回答正文，不将模型的思考内容展示给前端。代码默认值仍为 `demo`，因此在没有本机 `.env` 的环境中会使用演示回复。不要提交 `.env` 或在日志中打印密钥。
+使用 `openai_compatible` 时，适配器调用方舟的 `/chat/completions` 流式接口，只转发回答正文，不将模型的思考内容展示给前端。代码默认值为 `demo`，未显式设置 `LLM_PROVIDER` 时会使用演示回复；即使配置了 API Key 和模型 ID，只要 Provider 仍是 `demo`，也不会调用真实模型。不要提交 `.env` 或在日志中打印密钥。
 
 切换模型时，只需把 `.env` 中的 `LLM_MODEL` 改为目标模型 ID 或接入点 ID，然后重启服务端；模型名称不会写在请求处理代码中。当前本机配置的 `kimi-k3-1-pro-261024` 已通过实际流式请求验证。
 
@@ -84,7 +92,7 @@ tests/                   基础测试
 docs/                    架构和目录说明
 ```
 
-每个文件的职责和扩展规则见 [服务端架构与目录说明](docs/backend-architecture.md)。数据库安装、连接、常用命令、备份和排错见 [PostgreSQL 本地开发与测试指南](docs/database.md)。前端在独立的 `echo-nook-web` 仓库，两者通过 HTTP 接口连接。
+每个文件的职责和扩展规则见 [服务端架构与目录说明](docs/backend-architecture.md)。前后端各阶段技术难点、具体实现和取舍见 [对话功能技术难点与解决方案](docs/conversation-technical-decisions.md)。数据库安装、连接、常用命令、备份和排错见 [PostgreSQL 本地开发与测试指南](docs/database.md)。前端在独立的 `echo-nook-web` 仓库，两者通过 HTTP 接口连接。
 
 ## 测试
 
@@ -98,4 +106,4 @@ docs/                    架构和目录说明
 
 ## 对话功能后续规划
 
-开发顺序、任务状态、验收要求和实施记录见 [对话功能开发规划与进度](docs/conversation-roadmap.md)。每完成一个任务，同步更新该文档及受影响的接口、架构和运行说明。
+开发顺序、任务状态、验收要求和实施记录见 [对话功能开发规划与进度](docs/conversation-roadmap.md)。每完成一个任务，同步更新路线图、[技术难点与解决方案](docs/conversation-technical-decisions.md)及受影响的接口、架构和运行说明。

@@ -1,6 +1,6 @@
 # 服务端架构与目录说明
 
-EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；会话管理和新流式接口已读写数据库，旧前端暂时继续使用客户端历史接口。
+EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；会话管理和新流式接口已读写数据库，当前前端已经接入带会话 ID 的持久化接口。
 
 ## 目录与文件职责
 
@@ -29,6 +29,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `.env.example` | 不含密钥的环境配置模板，默认使用演示模型。 |
 | `.gitignore` | 排除 `.env`、虚拟环境和 Python 缓存等本机文件。 |
 | `docs/database.md` | PostgreSQL 本地配置、连接、常用命令、备份、迁移约定和排错说明。 |
+| `docs/conversation-technical-decisions.md` | 阶段零至当前任务的前后端技术难点、具体解决方案、代码定位和遗留边界；后续每完成一个路线图任务同步更新。 |
 | `alembic/`、`alembic.ini` | 异步数据库迁移环境、模板和版本脚本；连接地址从 `.env` 读取。 |
 | `pyproject.toml` | Python 版本、依赖和项目元数据。 |
 
@@ -88,13 +89,13 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。
 
-前端 `http-reply-provider.ts` 把本次用户输入放在 `message`，按完整回合构造最多 20 条 `history`。完成回复原样传入；失败或取消的部分回复带内部中断标记传入，空回复只保留对应用户消息。用户停止生成时会取消 HTTP 请求。
+当前前端 `http-reply-provider.ts` 只向带会话 ID 的接口提交本次 `message`，不再提交 `history`。服务端从数据库选择最多 20 条历史并处理失败或取消回复的中断标记。用户停止或切换会话时，前端会取消 HTTP 请求。
 
 `message.failed` 的 `code` 当前包括 `provider_not_configured`、`provider_auth_failed`、`model_not_available`、`provider_rate_limited`、`provider_timeout`、`provider_unreachable` 和 `generation_failed`。前端据此决定错误提示和是否提供重试；服务端错误文案不包含上游响应正文或密钥。
 
-客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。旧接口本身不保存历史；新接口当前保存用户问题，助手回复要等 S2-5 才能恢复。
+客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。新接口保存用户问题、助手草稿和最终状态；刷新或切换后可通过消息查询接口恢复。
 
-上面的无会话 ID 接口是旧版兼容接口，仍由客户端提供 `history`，也不会写入数据库。新前端应使用带会话 ID 的接口；阶段三完成切换后再规划移除旧接口。
+上面的无会话 ID 接口是旧版兼容接口，仍由调用方提供 `history`，也不会写入数据库。当前前端已经切换到带会话 ID 的接口；旧接口只为兼容和独立调试暂时保留，后续评估后移除。
 
 ## 环境隔离与调试
 
@@ -110,4 +111,4 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 ## 后续阶段
 
-后续按“对话链路稳定性 → 会话与消息持久化 → 前端历史会话体验 → 模型上下文管理 → 开放使用前的运行保障”推进。测试随开发同步进行，身份与归属校验等保障在向其他用户开放前完成。详细任务、验收要求和进度见 [对话功能开发规划与进度](conversation-roadmap.md)。每完成一个任务，更新规划状态、实施记录及受影响的当前架构说明。语音、知识库和长期记忆另行规划。
+后续按“对话链路稳定性 → 会话与消息持久化 → 前端历史会话体验 → 模型上下文管理 → 开放使用前的运行保障”推进。测试随开发同步进行，身份与归属校验等保障在向其他用户开放前完成。详细任务、验收要求和进度见 [对话功能开发规划与进度](conversation-roadmap.md)，设计原因和前后端实现见 [技术难点与解决方案](conversation-technical-decisions.md)。每完成一个任务，同步更新两份文档及受影响的当前架构说明。语音、知识库和长期记忆另行规划。
