@@ -8,12 +8,13 @@ from sqlalchemy.exc import IntegrityError
 
 from app.conversations.models import IdentitySession, Principal
 from app.core.config import Settings
-from app.core.dependencies import get_app_settings
+from app.core.dependencies import get_app_settings, get_conversation_limit_manager
 from app.core.identity import (
     ACTIVE_COOKIE, GUEST_COOKIE, check_origin, hash_password, issue_session,
     principal_for_token, require_identity, set_identity_cookie, verify_password, hash_token,
 )
 from app.db.dependencies import get_db_session
+from app.core.limits import ConversationLimitManager, LimitRejected
 
 router = APIRouter(prefix="/identity", tags=["identity"])
 
@@ -26,6 +27,22 @@ class Credentials(BaseModel):
 def identity_payload(principal: Principal) -> dict[str, str | None]:
     """返回前端可显示的身份信息，不泄露密码哈希和会话凭证。"""
     return {"id": str(principal.id), "kind": principal.kind, "username": principal.username}
+
+
+def login_limit_key(request: Request, username: str) -> str:
+    """组合来源地址与规范化用户名，避免一个来源锁死其他人的同名账号。"""
+    client_host = request.client.host if request.client is not None else "unknown"
+    return f"{client_host}:{username}"
+
+
+def login_limit_exception(error: LimitRejected) -> HTTPException:
+    """登录限流沿用结构化错误，并通过 Retry-After 告知等待秒数。"""
+    headers = {"Retry-After": str(error.retry_after)} if error.retry_after is not None else None
+    return HTTPException(
+        429,
+        detail={"code": error.code, "message": error.message},
+        headers=headers,
+    )
 
 
 @router.post("/bootstrap")
@@ -83,12 +100,22 @@ async def login(
     credentials: Credentials, request: Request, response: Response,
     session: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_app_settings),
+    limit_manager: ConversationLimitManager = Depends(get_conversation_limit_manager),
 ) -> dict[str, str | None]:
     """校验密码并切换到账号窗口；游客凭证仍留在浏览器。"""
     check_origin(request, settings)
-    account = await session.scalar(select(Principal).where(Principal.username == credentials.username.lower(), Principal.kind == "account"))
+    username = credentials.username.lower()
+    limit_key = login_limit_key(request, username)
+    try:
+        # 在昂贵的 scrypt 密码验证之前拦截已达到阈值的来源。
+        await limit_manager.ensure_login_allowed(limit_key)
+    except LimitRejected as error:
+        raise login_limit_exception(error) from None
+    account = await session.scalar(select(Principal).where(Principal.username == username, Principal.kind == "account"))
     if account is None or not account.password_hash or not verify_password(credentials.password, account.password_hash):
+        await limit_manager.record_login_failure(limit_key)
         raise HTTPException(401, detail={"code": "invalid_credentials", "message": "用户名或密码错误"})
+    await limit_manager.clear_login_failures(limit_key)
     token = await issue_session(session, account.id)
     await session.commit()
     set_identity_cookie(response, ACTIVE_COOKIE, token, settings, request)

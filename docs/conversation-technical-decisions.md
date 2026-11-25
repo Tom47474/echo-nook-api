@@ -343,3 +343,37 @@ S4-1 按预算选最近的完整回合；对长会话而言，较早的用户偏
 `DELETE /api/v1/conversations/current/messages` 由 Cookie 确定当前身份，前端确认后先取消本机 SSE，再调用接口。服务端锁住当前窗口行，在同一事务里删除其消息、重置摘要和覆盖序号，并递增 `content_epoch`；其他身份的窗口完全不受影响。新回合创建也锁此行，因此清空与开始发送有确定顺序。已在生成的流可能在清空后才完成，草稿写入以消息 ID 为条件，消息已删除时不会重新插入。摘要生成更慢：它先读取旧的 `content_epoch`，最终更新时同时要求版本仍相同；清空递增版本后，迟到的旧摘要无法重新写进窗口。前端若清空请求失败，会重新读取服务器消息，避免只在页面上清空而数据库仍有内容。
 
 `model_calls` 是服务端成本与用量记录，清空不删除它们，也不改变调用当时保存的 `usage_owner_id/kind`。这与删除旧容器时的级联规则不同：当前窗口保留，清除的是 `messages` 与上下文摘要。界面仍不展示 token 用量。测试覆盖单窗口重复读取、游客/账号切换、清空隔离和调用记录留存；前端验证页头身份交互、当前窗口加载、清空失败恢复、REST 与 SSE。正式部署还需按 S5-4 验证多实例同时清空与流式生成、同站 HTTPS Cookie。
+
+## S5-2：可配置额度、并发租约与模型超时（已完成）
+
+### 难点一：一个开关要关闭“限额”，但不能关闭资源安全超时
+
+本地开发经常需要连续调试，如果游客每天只能发送固定次数，会妨碍开发；测试和正式环境又不能无限调用付费模型。[Settings](../app/core/config.py) 因此把两类配置明确拆开。`CONVERSATION_LIMIT_ENABLED` 是业务限额总开关：为 `true` 时启用游客/账号日额度、每分钟频率、同身份单生成、服务进程全局并发和登录失败保护；为 `false` 时这些检查全部跳过。游客使用 `CONVERSATION_GUEST_DAILY_LIMIT`、`CONVERSATION_GUEST_MINUTE_LIMIT`，账号使用对应的 `ACCOUNT` 配置，额度不写死在代码中。仓库模板和本机 `.env` 初始都设为 `false`，需要验证限额时显式改成 `true` 并重启服务。
+
+连接超时与限额不是同一概念。即使不限额，一个永远不返回的上游也不能永久占用 HTTP 连接、数据库草稿任务和内存。因此 `LLM_CONNECT_TIMEOUT_SECONDS`、`LLM_READ_TIMEOUT_SECONDS`、`LLM_REPLY_TIMEOUT_SECONDS`、`LLM_SUMMARY_TIMEOUT_SECONDS` 始终生效，不受总开关控制。`OpenAICompatibleProvider` 把连接与相邻数据读取边界交给 httpx；[stream_conversation()](../app/conversations/service.py) 再用 `asyncio.timeout()` 包住完整主回复流，覆盖“持续偶尔发片段、所以读取超时永远不触发”的情况。摘要有独立且更短的总超时；摘要超时沿用 S4-3 的失败回退，主回复仍可继续。
+
+### 难点二：日额度不能随着清空消息或身份切换被重置
+
+如果按 `messages` 计数，用户点击“清空对话”就会删除计数依据；如果按当前窗口的 `owner_id` 反推，登录和退出又可能把历史费用算错身份。S5-1 已在每次真实调用开始时把 `usage_owner_id` 和 `usage_owner_kind` 快照写进 `model_calls`，S5-2 直接按这个不可变快照统计。每次发送前查询 UTC 当天 `purpose='reply'` 的记录数；游客和账号分别与各自配置比较。摘要虽然是实际成本，仍以 `purpose='summary'` 单独记录，但不占用户“可发送多少次”的产品额度。失败或取消的主回复只要真实 Provider 已经开始且留下调用记录，也计为一次，因为上游可能已经产生费用；演示 Provider 不创建真实调用记录。
+
+迁移 [0007_s5_limits.py](../alembic/versions/0007_s5_limits.py) 为 `(usage_owner_id, purpose, created_at)` 增加复合索引，使每次发送前的当日统计按身份和用途定位时间范围，而不是随着 `model_calls` 增长反复全表扫描。这里按“回复次数”而不是供应商 `total_tokens` 拒绝请求：供应商可能在取消或断流时不返回 token，用未知值做 token 配额会产生可绕过的缺口。真实 token 仍保留用于成本观测，后续如果改成 token 套餐，需要先规定未知用量的保守扣减规则。
+
+### 难点三：并发名额必须覆盖整个 SSE，而不是只覆盖路由函数
+
+FastAPI 路由返回 `StreamingResponse` 时，真正的异步生成器通常还没有开始迭代。如果在路由 `return` 前就释放锁，看起来“接口处理结束”了，实际上模型仍在输出，第二个请求会立即进入，单身份和全局并发限制形同虚设。[ConversationLimitManager](../app/core/limits.py) 因而返回 `GenerationLease`：校验成功后把身份加入活动集合并增加全局计数；[release_after_stream()](../app/api/routes/conversations.py) 包装持久化事件流，在正常完成、模型失败、消费者主动停止或浏览器断开触发的 `finally` 中关闭内层流并幂等释放租约。若路由在构造响应前异常，则由路由异常分支释放，避免永久占位。
+
+校验顺序也影响数据一致性。输入预算通过后，服务端先取得限额租约，再调用 `start_turn()` 创建用户消息与助手占位；因此日额度、分钟频率、同身份在途或全局繁忙拒绝时数据库一条消息都不会增加。分钟限制使用每个身份的 60 秒滑动时间队列；同身份只能有一个在途回复；全局限制保护当前服务进程。429 响应包含 `conversation_daily_limit`、`conversation_rate_limited`、`conversation_in_progress` 或 `conversation_server_busy`，有明确等待时间时附 `Retry-After`。
+
+这些短窗口状态当前故意放在应用级内存，而不是让慢 SSE 长期占用数据库锁。它符合现阶段单工作进程部署，但进程重启会清空分钟和登录失败记录，多工作进程也不会共享全局计数。首个生产版本必须保持单个 API worker；如果以后横向扩容，应把滑动窗口和带过期时间的租约迁到 Redis 等共享协调器，不能直接宣称当前计数是集群级限制。持久化的 UTC 日额度不受进程重启影响。
+
+### 难点四：登录防暴力与旧接口都可能成为绕过入口
+
+账号密码采用 scrypt，单次校验有意消耗较多 CPU；无限错误登录不仅威胁账号，也可能成为计算资源攻击。[identity.py](../app/api/routes/identity.py) 在执行密码校验前检查“来源地址 + 规范化用户名”的失败窗口，只把真正的用户名/密码校验失败计入，成功登录清空该组合的失败记录。达到 `LOGIN_FAILURE_LIMIT` 后返回 429 `login_rate_limited` 和 `Retry-After`。组合来源和用户名可避免单一攻击来源直接把某账号对所有正常用户锁死，但反向代理部署时还必须确保应用取得可信客户端地址，不能盲目信任外部伪造的转发头。
+
+旧 `POST /conversations/messages:stream` 不持久化窗口和调用归属。如果启用日额度后仍允许它调用模型，任何人都可以绕开 `model_calls` 统计。因此限额总开关为 `true` 时旧接口返回 410 `legacy_stream_disabled`；当前前端早已只使用带会话 ID 的持久化接口。关闭限额时旧接口仍可用于本地兼容调试，并同样受模型总超时保护。
+
+### 前端错误对齐、验证和剩余边界
+
+限额拒绝发生在 SSE 建立之前，是普通 JSON HTTP 429，不会以 `message.failed` 帧到达。旧 [HttpReplyProvider](../../echo-nook-web/src/modules/conversation/services/http-reply-provider.ts) 把所有非 2xx 都转换为 `network_error`，用户无法区分网络断开和额度用完。当前实现会读取 `detail.code/message`，保留四种对话限额错误；`conversation_daily_limit` 标记为不可立即重试，因此消息气泡不显示会再次得到同一 429 的重试按钮，分钟频率、在途冲突和服务繁忙仍可重试。页面仍不展示 token 或剩余额度。
+
+服务端测试覆盖游客日额度在写消息前拒绝、游客/账号读取不同配置、分钟限制与总开关关闭、同身份和全局租约释放、登录失败窗口、旧接口防绕过以及总超时关闭慢 Provider；前端测试覆盖非 SSE 429 的错误码、文案和可重试属性。日额度使用 UTC 自然日而不是浏览器本地时区；产品若希望按中国自然日重置，需要单独调整统计边界。S5-3 将在不记录对话正文和凭证的前提下，为这些 429、超时和模型结束状态增加结构化日志。

@@ -25,6 +25,21 @@ class Settings(BaseSettings):
     llm_context_window_tokens: int = Field(default=32768, gt=0)
     llm_max_output_tokens: int = Field(default=4096, gt=0)
     llm_token_safety_margin: int = Field(default=1024, ge=0)
+    # 上游连接、相邻数据片段和单次主回复分别设置边界，避免慢连接长期占用资源。
+    llm_connect_timeout_seconds: float = Field(default=10.0, gt=0)
+    llm_read_timeout_seconds: float = Field(default=120.0, gt=0)
+    llm_reply_timeout_seconds: float = Field(default=180.0, gt=0)
+    llm_summary_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # 总开关关闭时不执行额度、频率和并发拒绝；超时仍始终生效。
+    conversation_limit_enabled: bool = False
+    conversation_guest_daily_limit: int = Field(default=20, gt=0)
+    conversation_account_daily_limit: int = Field(default=100, gt=0)
+    conversation_guest_minute_limit: int = Field(default=3, gt=0)
+    conversation_account_minute_limit: int = Field(default=10, gt=0)
+    conversation_global_concurrency_limit: int = Field(default=8, gt=0)
+    login_failure_limit: int = Field(default=5, gt=0)
+    login_failure_window_seconds: int = Field(default=900, gt=0)
 
     @model_validator(mode="after")
     def validate_token_budget(self) -> "Settings":

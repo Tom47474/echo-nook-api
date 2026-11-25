@@ -21,8 +21,9 @@ from app.conversations.service import (
     build_database_history, current_input_tokens, input_token_budget, stream_conversation,
 )
 from app.core.config import Settings
-from app.core.dependencies import get_app_settings
+from app.core.dependencies import get_app_settings, get_conversation_limit_manager
 from app.core.identity import require_identity
+from app.core.limits import ConversationLimitManager, GenerationLease, LimitRejected
 from app.db.dependencies import get_database_manager, get_db_session
 from app.db.session import DatabaseManager
 from app.llm.factory import create_llm_provider
@@ -36,6 +37,29 @@ def conversation_not_found() -> HTTPException:
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"code": "conversation_not_found", "message": "会话不存在"},
     )
+
+
+def limit_http_exception(error: LimitRejected) -> HTTPException:
+    """把业务限额拒绝统一转换为前端可识别的 429 响应。"""
+    headers = {"Retry-After": str(error.retry_after)} if error.retry_after is not None else None
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={"code": error.code, "message": error.message},
+        headers=headers,
+    )
+
+
+async def release_after_stream(events: AsyncIterator[str], lease: GenerationLease) -> AsyncIterator[str]:
+    """让并发名额覆盖整个 SSE 生命周期，包括客户端主动断开。"""
+    try:
+        async for event in events:
+            yield event
+    finally:
+        try:
+            await events.aclose()
+        finally:
+            # 内层流关闭本身异常时也不能泄漏应用级并发名额。
+            await lease.release()
 
 
 @router.get("/current", response_model=ConversationRead)
@@ -156,6 +180,7 @@ async def stream_conversation_message(
     session: AsyncSession = Depends(get_db_session),
     manager: DatabaseManager = Depends(get_database_manager),
     settings: Settings = Depends(get_app_settings),
+    limit_manager: ConversationLimitManager = Depends(get_conversation_limit_manager),
     identity: Principal = Depends(require_identity),
 ) -> StreamingResponse:
     """创建完整回合、加载数据库历史，并持久化助手流式状态。"""
@@ -172,75 +197,88 @@ async def stream_conversation_message(
         )
     # 后续 commit/rollback 会使身份 ORM 对象过期；先提取调用归属快照。
     identity_id, identity_kind = identity.id, identity.kind
-    repository = ConversationRepository(session)
-    turn = await repository.start_turn(
-        conversation_id,
-        request.message,
-        owner_id=identity_id,
-    )
-    if turn is None:
-        raise conversation_not_found()
-    user_message, assistant_message = turn
+    try:
+        # 所有限制都必须在创建用户消息和助手占位之前完成，拒绝请求不能污染历史。
+        lease = await limit_manager.acquire_generation(identity_id, identity_kind)
+    except LimitRejected as error:
+        raise limit_http_exception(error) from None
 
-    # 必须先提交用户消息和助手占位消息再调用模型；提交会释放 start_turn
-    # 获取的行锁，后续慢模型不会阻塞同会话的其他数据库操作。
-    await session.commit()
-    # SSE 在路由返回后才开始执行，因此先提取标量，不能让后台流访问稍后会
-    # 过期或脱离 Session 的 ORM 对象。
-    user_message_id = user_message.id
-    assistant_message_id = assistant_message.id
-    user_sequence = user_message.sequence
-    assistant_sequence = assistant_message.sequence
-    stored_history = await repository.load_model_history(
-        conversation_id,
-        before_sequence=user_sequence,
-        scan_limit=None,
-    )
-    # rollback 会使 ORM 实例过期；先复制摘要和裁剪所需标量，避免模型阶段隐式访问数据库。
-    history_snapshot = [
-        Message(role=item.role, content=item.content, status=item.status, sequence=item.sequence)
-        for item in stored_history
-    ]
-    # SELECT 会自动开启只读事务；模型流开始前显式结束它，避免慢模型长时间
-    # 占用 PostgreSQL 连接。Session 本身稍后仍由依赖统一关闭。
-    await session.rollback()
-    provider = create_llm_provider(settings)
-    # 摘要仅在真实模型下按需更新；失败时继续依靠近期原文回答。
-    summary, covered_sequence = ("", -1)
-    if settings.llm_provider == "openai_compatible":
-        try:
-            summary, covered_sequence = await refresh_summary(
-                manager, provider, conversation_id, history_snapshot,
-                usage_owner_id=identity_id, usage_owner_kind=identity_kind,
-            )
-        except Exception:
-            # 摘要是增强功能；读取或更新失败时仍用近期原文完成本次问答。
+    repository = ConversationRepository(session)
+    try:
+        turn = await repository.start_turn(
+            conversation_id,
+            request.message,
+            owner_id=identity_id,
+        )
+        if turn is None:
+            raise conversation_not_found()
+        user_message, assistant_message = turn
+
+        # 必须先提交用户消息和助手占位消息再调用模型；提交会释放 start_turn
+        # 获取的行锁，后续慢模型不会阻塞同会话的其他数据库操作。
+        await session.commit()
+        # SSE 在路由返回后才开始执行，因此先提取标量，不能让后台流访问稍后会
+        # 过期或脱离 Session 的 ORM 对象。
+        user_message_id = user_message.id
+        assistant_message_id = assistant_message.id
+        user_sequence = user_message.sequence
+        assistant_sequence = assistant_message.sequence
+        stored_history = await repository.load_model_history(
+            conversation_id,
+            before_sequence=user_sequence,
+            scan_limit=None,
+        )
+        # rollback 会使 ORM 实例过期；先复制摘要和裁剪所需标量，避免模型阶段隐式访问数据库。
+        history_snapshot = [
+            Message(role=item.role, content=item.content, status=item.status, sequence=item.sequence)
+            for item in stored_history
+        ]
+        # SELECT 会自动开启只读事务；模型流开始前显式结束它，避免慢模型长时间
+        # 占用 PostgreSQL 连接。Session 本身稍后仍由依赖统一关闭。
+        await session.rollback()
+        provider = create_llm_provider(settings)
+        # 摘要仅在真实模型下按需更新；失败时继续依靠近期原文回答。
+        summary, covered_sequence = ("", -1)
+        if settings.llm_provider == "openai_compatible":
+            try:
+                summary, covered_sequence = await refresh_summary(
+                    manager, provider, conversation_id, history_snapshot,
+                    usage_owner_id=identity_id, usage_owner_kind=identity_kind,
+                    timeout_seconds=settings.llm_summary_timeout_seconds,
+                )
+            except Exception:
+                # 摘要是增强功能；读取或更新失败时仍用近期原文完成本次问答。
+                summary, covered_sequence = "", -1
+        if current_input_tokens(request.message, summary) > budget:
             summary, covered_sequence = "", -1
-    if current_input_tokens(request.message, summary) > budget:
-        summary, covered_sequence = "", -1
-    history = build_database_history(
-        [item for item in history_snapshot if item.sequence > covered_sequence],
-        token_budget=budget,
-        current_message=request.message,
-        context_summary=summary,
-    )
-    # 同一 Provider 先后服务摘要和主回复；主流尚未开始就断开时不能复用摘要指标。
-    if hasattr(provider, "last_call_metrics"):
-        provider.last_call_metrics = None
-    stream_request = StreamMessageRequest(message=request.message, history=history, context_summary=summary)
-    events = stream_persisted_conversation(
-        stream_request,
-        provider,
-        manager,
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        user_sequence=user_sequence,
-        assistant_sequence=assistant_sequence,
-        conversation_id=conversation_id,
-        usage_owner_id=identity_id,
-        usage_owner_kind=identity_kind,
-    )
-    return create_streaming_response(events)
+        history = build_database_history(
+            [item for item in history_snapshot if item.sequence > covered_sequence],
+            token_budget=budget,
+            current_message=request.message,
+            context_summary=summary,
+        )
+        # 同一 Provider 先后服务摘要和主回复；主流尚未开始就断开时不能复用摘要指标。
+        if hasattr(provider, "last_call_metrics"):
+            provider.last_call_metrics = None
+        stream_request = StreamMessageRequest(message=request.message, history=history, context_summary=summary)
+        events = stream_persisted_conversation(
+            stream_request,
+            provider,
+            manager,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            user_sequence=user_sequence,
+            assistant_sequence=assistant_sequence,
+            conversation_id=conversation_id,
+            usage_owner_id=identity_id,
+            usage_owner_kind=identity_kind,
+            timeout_seconds=settings.llm_reply_timeout_seconds,
+        )
+        return create_streaming_response(release_after_stream(events, lease))
+    except Exception:
+        # 返回 StreamingResponse 之前失败时不会进入包装生成器，必须在这里释放名额。
+        await lease.release()
+        raise
 
 
 @router.post("/messages:stream", deprecated=True)
@@ -250,5 +288,16 @@ async def stream_message(
     identity: Principal = Depends(require_identity),
 ) -> StreamingResponse:
     """兼容旧前端：历史仍由客户端传入，S3 前保持该接口可用。"""
+    if settings.conversation_limit_enabled:
+        # 旧接口不持久化调用归属，启用额度时必须关闭，避免绕过身份日额度。
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={
+                "code": "legacy_stream_disabled",
+                "message": "旧版流式接口在启用限额时不可用，请使用带会话 ID 的接口",
+            },
+        )
     provider = create_llm_provider(settings)
-    return create_streaming_response(stream_conversation(request, provider))
+    return create_streaming_response(
+        stream_conversation(request, provider, timeout_seconds=settings.llm_reply_timeout_seconds)
+    )

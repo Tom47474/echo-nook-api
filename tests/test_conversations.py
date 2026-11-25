@@ -163,6 +163,28 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("provider_timeout", events[0])
 
+    def test_total_reply_timeout_closes_slow_provider(self) -> None:
+        closed = False
+
+        class SlowProvider:
+            async def stream_reply(self, messages, system_prompt):
+                nonlocal closed
+                try:
+                    await asyncio.sleep(1)
+                    yield "过晚的回答"
+                finally:
+                    closed = True
+
+        async def collect() -> list[str]:
+            request = StreamMessageRequest(message="超时测试")
+            return [event async for event in stream_conversation(
+                request, SlowProvider(), timeout_seconds=0.01,
+            )]
+
+        events = asyncio.run(collect())
+        self.assertTrue(closed)
+        self.assertIn("provider_timeout", events[0])
+
     def test_closing_conversation_stream_closes_provider(self) -> None:
         class CancellableProvider:
             def __init__(self) -> None:
