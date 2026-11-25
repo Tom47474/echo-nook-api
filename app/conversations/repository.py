@@ -45,6 +45,10 @@ class ConversationRepository:
         )
         return found is not None
 
+    async def get(self, conversation_id: UUID) -> Conversation | None:
+        """按主键读取单个会话，供直接打开 URL 时验证并取得标题。"""
+        return await self.session.get(Conversation, conversation_id)
+
     async def list_messages(
         self,
         conversation_id: UUID,

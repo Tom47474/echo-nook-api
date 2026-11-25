@@ -57,6 +57,18 @@ async def list_conversations(
     return ConversationList(items=items, total=total, offset=offset, limit=limit)
 
 
+@router.get("/{conversation_id}", response_model=ConversationRead)
+async def get_conversation(
+    conversation_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+) -> ConversationRead:
+    """通过 URL 中的会话 ID 查询会话，不依赖列表前 100 条是否包含它。"""
+    conversation = await ConversationRepository(session).get(conversation_id)
+    if conversation is None:
+        raise conversation_not_found()
+    return ConversationRead.model_validate(conversation)
+
+
 @router.get("/{conversation_id}/messages", response_model=MessagePage)
 async def list_conversation_messages(
     conversation_id: UUID,

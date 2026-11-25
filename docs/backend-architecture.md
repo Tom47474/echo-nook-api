@@ -64,6 +64,8 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `GET /api/v1/conversations` 使用 `offset`（默认 0）和 `limit`（默认 20，最大 100），返回 `items`、`total`、`offset`、`limit`。结果按 `updated_at DESC, id DESC` 排列，UUID 作为时间相同情况下的稳定排序键。
 
+`GET /api/v1/conversations/{id}` 按 ID 返回单个会话；不存在时返回结构化 404。前端直达链接用此接口验证目标，即使它不在会话列表第一页也可以恢复。
+
 `GET /api/v1/conversations/{id}/messages` 使用 `limit`（默认 50，最大 100）和可选 `before_sequence`。接口从最新消息向前取一页，但 `items` 始终按 `sequence` 正序返回；`has_more` 和 `next_before_sequence` 指示下一页。
 
 `DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。

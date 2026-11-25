@@ -67,6 +67,16 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"]["code"], "conversation_not_found")
 
+    async def test_get_conversation_by_id_for_direct_link(self) -> None:
+        conversation = await self.create_conversation("直达链接")
+        response = await self.client.get(f"/api/v1/conversations/{conversation['id']}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["title"], "直达链接")
+
+        missing = await self.client.get(f"/api/v1/conversations/{uuid4()}")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["detail"]["code"], "conversation_not_found")
+
     async def test_message_query_uses_sequence_cursor(self) -> None:
         conversation = await self.create_conversation("分页会话")
         conversation_id = UUID(conversation["id"])

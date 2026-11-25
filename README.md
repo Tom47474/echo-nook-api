@@ -42,12 +42,15 @@ curl -N -X POST http://localhost:8000/api/v1/conversations/{conversation_id}/mes
 ```text
 POST   /api/v1/conversations
 GET    /api/v1/conversations?offset=0&limit=20
+GET    /api/v1/conversations/{id}
 GET    /api/v1/conversations/{id}/messages?limit=50&before_sequence=100
 POST   /api/v1/conversations/{id}/messages:stream
 DELETE /api/v1/conversations/{id}
 ```
 
 会话列表按最近更新时间倒序排列；消息接口默认读取最新一页，但响应内始终按 `sequence` 正序排列。新的会话流式接口只接收本次 `message`：服务端原子创建用户消息和助手占位消息，再从数据库加载最近完整回合并调用模型，客户端不能提交 `history`。助手正文会分段保存，完成、失败和用户停止都会写入最终状态。
+
+前端使用 `/?conversation=<会话UUID>` 保存当前会话。直接打开链接时通过单会话查询验证 ID 并恢复消息；已删除或无效的链接会回退最近会话并提示。当前仍只读取最近 100 条消息，更早记录在 S3-3 接入分页。
 
 新接口首先发送 `message.started`，其中包含用户/助手消息 UUID 和 sequence；随后发送原有的 `message.delta`、`message.completed` 或 `message.failed`。处理新分片时，如果草稿累计新增 200 字符或距上次保存已达 1 秒，就执行一次检查点保存；最终事件前再完整保存。
 
