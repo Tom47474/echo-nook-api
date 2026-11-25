@@ -74,7 +74,7 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。
 
-`POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。失败或取消的历史助手正文会附加内部中断标记。会话不存在时返回结构化 404。
+`POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。历史查询保留终态助手的空正文，业务层才能判断最后一次尝试是否为空；失败或取消的非空正文附加内部中断标记，空回复只保留用户问题。多个助手终态属于同一用户消息时以最后一次为准；当前“再次提问”创建新的用户/助手回合，不把相同问题自动合并。会话不存在时返回结构化 404。
 
 新流首先发送 `message.started`，携带两条消息的 UUID 和 sequence，供前端把临时消息与数据库记录对齐。正文仍通过 `message.delta` 发送；`message.completed` 发送前保存完整正文和 `completed`，`message.failed` 发送前保存部分正文、`failed` 和结构化 `error_code`。客户端中断或外层生成器关闭时保存 `cancelled`。
 

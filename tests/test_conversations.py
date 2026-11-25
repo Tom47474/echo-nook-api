@@ -14,6 +14,38 @@ from app.llm.demo import DemoLLMProvider
 
 
 class ConversationTests(unittest.TestCase):
+    def test_latest_empty_failed_attempt_does_not_reuse_old_answer(self) -> None:
+        messages = [
+            Message(role=MessageRole.ASSISTANT.value, content="孤立回答", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.USER.value, content="问题", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.ASSISTANT.value, content="旧回答", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.ASSISTANT.value, content="", status=MessageStatus.FAILED.value),
+        ]
+        history = build_database_history(messages)
+        self.assertEqual([(item.role, item.content) for item in history], [("user", "问题")])
+
+    def test_partial_cancelled_reply_and_separate_retry_turn(self) -> None:
+        messages = [
+            Message(role=MessageRole.USER.value, content="同一个问题", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.ASSISTANT.value, content="半段", status=MessageStatus.CANCELLED.value),
+            # 当前“再次提问”会新增用户消息；相同正文不能证明是同一回合。
+            Message(role=MessageRole.USER.value, content="同一个问题", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.ASSISTANT.value, content="完整回答", status=MessageStatus.COMPLETED.value),
+        ]
+        history = build_database_history(messages)
+        self.assertEqual(
+            [item.content for item in history],
+            ["同一个问题", "半段" + INTERRUPTED_SUFFIX, "同一个问题", "完整回答"],
+        )
+
+    def test_nonterminal_assistant_does_not_replace_last_terminal_attempt(self) -> None:
+        messages = [
+            Message(role=MessageRole.USER.value, content="问题", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.ASSISTANT.value, content="完成的回答", status=MessageStatus.COMPLETED.value),
+            Message(role=MessageRole.ASSISTANT.value, content="生成中", status=MessageStatus.STREAMING.value),
+        ]
+        self.assertEqual(build_database_history(messages)[-1].content, "完成的回答")
+
     def test_token_budget_keeps_recent_complete_turns(self) -> None:
         messages = [
             Message(role=role, content=content, status=MessageStatus.COMPLETED.value)

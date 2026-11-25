@@ -172,7 +172,6 @@ class ConversationRepository:
                         MessageStatus.CANCELLED.value,
                     )
                 ),
-                Message.content != "",
             )
             .order_by(Message.sequence.desc())
             .limit(scan_limit)

@@ -55,9 +55,15 @@ def build_database_history(
         if message.role == MessageRole.USER.value:
             if current_turn:
                 turns.append(current_turn)
-            current_turn = [message]
-        elif current_turn and message.role == MessageRole.ASSISTANT.value:
-            # 同一回合可能因重新生成存在多条助手消息，只保留最后一条。
+            # 空问题和未完成问题不是可复用的历史回合。
+            current_turn = [message] if message.status == MessageStatus.COMPLETED.value and message.content.strip() else []
+        elif current_turn and message.role == MessageRole.ASSISTANT.value and message.status in {
+            MessageStatus.COMPLETED.value,
+            MessageStatus.FAILED.value,
+            MessageStatus.CANCELLED.value,
+        }:
+            # 若同一用户消息之后存在多次助手尝试，以最后一个终态为准。
+            # 最后一次为空时保留用户问题，但不能退回旧回答冒充新结果。
             current_turn = [current_turn[0], message]
     if current_turn:
         turns.append(current_turn)

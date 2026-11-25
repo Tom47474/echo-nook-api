@@ -13,6 +13,7 @@ from app.conversations.models import (
     MessageStatus,
 )
 from app.conversations.service import current_input_tokens
+from app.conversations.repository import ConversationRepository
 from app.core.config import Settings
 from app.main import create_app, lifespan
 
@@ -268,6 +269,24 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["detail"]["code"], "input_budget_exceeded")
         stored = await self.client.get(f"/api/v1/conversations/{conversation['id']}/messages")
         self.assertEqual(stored.json()["items"], [])
+
+    async def test_model_history_keeps_empty_final_attempt_for_turn_selection(self) -> None:
+        conversation = await self.create_conversation("多次助手尝试")
+        conversation_id = UUID(conversation["id"])
+        async with self.app.state.database_manager.session() as session:
+            session.add_all([
+                Message(conversation_id=conversation_id, role=MessageRole.USER.value,
+                        content="问题", status=MessageStatus.COMPLETED.value, sequence=0),
+                Message(conversation_id=conversation_id, role=MessageRole.ASSISTANT.value,
+                        content="旧回答", status=MessageStatus.COMPLETED.value, sequence=1),
+                Message(conversation_id=conversation_id, role=MessageRole.ASSISTANT.value,
+                        content="", status=MessageStatus.FAILED.value, sequence=2),
+            ])
+            await session.commit()
+            history = await ConversationRepository(session).load_model_history(
+                conversation_id, before_sequence=3,
+            )
+        self.assertEqual([item.sequence for item in history], [0, 1, 2])
 
     async def test_concurrent_user_messages_receive_unique_sequences(self) -> None:
         conversation = await self.create_conversation("并发顺序")
