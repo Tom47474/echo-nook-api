@@ -57,7 +57,7 @@ DELETE /api/v1/conversations/{id}
 
 长对话在真实模型模式下按需更新会话摘要：保留最近 10 个问答回合原文，每次最多将更早的 3 个回合并入摘要；摘要和近期原文共同进入模型上下文，失败时回退到原文。摘要生成会额外调用一次模型，摘要只用于服务端上下文，不作为消息展示。首次使用前执行 `.venv/bin/alembic upgrade head`（测试库使用 `APP_ENV=test`）。
 
-S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。当前数据库版本为 `0006_single_window`；升级服务前先执行 `alembic upgrade head`。
+S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。主回复会先提交调用记录再发送 `message.completed`/`message.failed`，浏览器收到终态后立即关闭 SSE 也不会丢失 usage；主动停止的收尾写入受取消保护。表中不保存提示词、回复正文或 API Key。当前数据库版本为 `0006_single_window`；升级服务前先执行 `alembic upgrade head`。
 
 当前产品策略为游客和登录账号均免费使用，不设置用户级次数、Token、分钟频率或并发额度，也没有登录失败限流配置。`model_calls` 的 usage 和调用时身份快照只用于内部成本观察与故障排查，不会拒绝用户请求，前端也不展示额度。曾实现的 S5-2 限额方案已撤销，原因和保留边界见[技术难点文档](docs/conversation-technical-decisions.md#s5-2用户额度与调用限制已撤销)。
 

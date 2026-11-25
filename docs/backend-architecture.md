@@ -16,7 +16,7 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供身份管理、单�
 | `app/core/dependencies.py` | 从当前 FastAPI 实例读取实际配置，避免测试应用和默认应用混用设置。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
 | `app/conversations/models.py` | 身份、凭证、窗口、消息和模型调用 ORM 模型及数据库约束。 |
-| `app/conversations/persistence.py` | 包装模型 SSE，节流保存助手草稿、写入最终状态并恢复异常中断消息。 |
+| `app/conversations/persistence.py` | 包装模型 SSE，节流保存助手草稿；终态事件前提交调用记录，并以取消安全的清理任务保存停止状态和 usage。 |
 | `app/conversations/repository.py` | 唯一当前窗口、清空、归属校验、消息游标和回合创建的 SQLAlchemy 查询。 |
 | `app/conversations/summary.py` | 长对话滚动摘要、并发边界和清空版本校验。 |
 | `app/conversations/call_records.py` | 保存真实模型调用状态、耗时和供应商用量。 |
@@ -87,6 +87,8 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 `DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。
 
 `POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。历史查询保留终态助手的空正文，业务层才能判断最后一次尝试是否为空；失败或取消的非空正文附加内部中断标记，空回复只保留用户问题。多个助手终态属于同一用户消息时以最后一次为准；当前“再次提问”创建新的用户/助手回合，不把相同问题自动合并。会话不存在时返回结构化 404。
+
+正常完成或失败时，持久化层先保存助手终态及 `model_calls`，再向浏览器发送 `message.completed` 或 `message.failed`。这是终态协议的一部分：前端收到完成事件会立即取消响应体，如果把调用记录推迟到事件之后，服务端任务可能先被取消而留下“有 completed 消息、没有 usage”的不一致。主动停止或网络断开没有终态事件，服务端将关闭 Provider、保存 `cancelled` 消息和记录模型调用组合成独立的取消安全清理任务；调用记录写入失败只记资源 ID 错误日志，不记录正文、Cookie 或密钥，也不改变用户已收到的回答。
 
 S4-3 由 `0003_conversation_summary` 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。真实模型模式下，超过最近 10 个回合的旧记录按每次最多 3 回合滚动压缩；摘要覆盖边界之前的原文不再重复送入主模型。摘要放在系统背景信息中，近期消息仍按 S4-1 预算和 S4-2 回合规则选择。摘要生成或保存失败时使用原文继续回答；并发更新以旧覆盖边界和 `content_epoch` 为条件，避免旧请求覆盖新摘要或在清空后回写。演示模型不生成摘要。当前数据库应统一升级到 head `0006_single_window`。
 

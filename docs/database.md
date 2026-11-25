@@ -130,6 +130,8 @@ erDiagram
 
 `ix_model_calls_conversation_created` 支持按窗口和时间查询。摘要调用和主回复调用分别占一行。该表不保存提示词、回复正文或 API Key。页面执行“清空对话”时保留调用记录，用于成本核算和排错；只有删除整个 `conversations` 容器时才会级联删除。
 
+主回复正常完成或失败时，服务端在发送终态 SSE 之前提交对应 `model_calls`；用户主动停止或浏览器断开时，调用记录与消息终态由取消安全的清理任务提交。因此 `messages` 中新增一条终态助手消息后，应能按 `model_calls.assistant_message_id = messages.id` 找到真实 Provider 的调用记录。`demo` Provider 或真实调用尚未开始时没有真实指标，不创建伪造记录；供应商未返回 usage 时记录仍可存在，但 Token 字段保持 `NULL`。
+
 ## `alembic_version`：迁移版本
 
 | 字段 | 类型与空值 | 用途 |

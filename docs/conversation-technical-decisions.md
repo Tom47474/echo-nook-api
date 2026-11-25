@@ -320,6 +320,14 @@ S4-1 按预算选最近的完整回合；对长会话而言，较早的用户偏
 
 测试覆盖 `choices=[]` 用量尾块、`finish_reason` 和实际模型名、缺失用量保留空值、摘要与主回复两条记录，以及失败和取消调用的已知字段与未知字段。服务端 42 项测试通过；本地开发库与测试库均升级到 `0004_model_calls`，两个环境的 `alembic check` 均无差异。可用 [数据库指南](database.md) 中的只读 SQL 在 DBeaver 查看最近调用。当前不提供面向前端的用量查询接口；阶段五的身份归属完成前，不应开放按会话查看内部调用记录的公共接口。
 
+### 补充修复：终态 SSE 不能先于调用记录提交
+
+浏览器的 [HttpReplyProvider](../../echo-nook-web/src/modules/conversation/services/http-reply-provider.ts) 读到 `message.completed` 后结束循环，并对尚未自然结束的响应体执行 `reader.cancel()`。旧服务端先把 `message.completed` 交给浏览器，只在异步生成器 `finally` 中调用 `record_model_call()`；客户端取消可能使 ASGI 流任务在数据库提交前终止。于是助手消息已经是 `completed`，页面也得到完整回答，但同一 `assistant_message_id` 没有 `model_calls`。调用记录异常又被 `except Exception: pass` 静默忽略，界面和服务日志都看不到原因。真实开发库曾出现连续两条完成消息缺少调用记录，证明这不是 DBeaver 缓存问题。
+
+修复后的 [stream_persisted_conversation()](../app/conversations/persistence.py) 在识别 `message.completed` 或 `message.failed` 时，先用短事务保存助手终态，再通过取消安全任务提交 `model_calls`，成功后才 `yield` 终态 SSE。此时 Provider 已经结束或抛出异常，`last_call_metrics` 中的模型、耗时、结束原因和可取得 usage 已经稳定。即使浏览器在下一微秒取消响应体，关键调用记录也已经提交。记录写入失败仍不应把完整聊天改成失败，但现在使用不含正文、Cookie 和密钥的资源 ID 日志代替静默吞错。
+
+主动停止没有 completed/failed 事件，不能使用同一前置时机。最终清理把 `source.aclose()`、助手 `cancelled` 状态和调用记录放入一个独立任务，并以 `asyncio.shield()` 防止请求取消连带中断；等待清理完成后才把 `CancelledError` 交还给 ASGI。一次流用 `call_record_attempted` 保证最多尝试写一条回复记录，正常终态进入 `finally` 时不会重复插入。新增测试在读取 completed 后、尚未关闭生成器时立即查询数据库，并直接取消正在等待后续片段的消费任务，分别验证完成 usage 已提交和取消调用仍留记录；另用模拟数据库异常验证记录失败会写日志，但助手消息和终态 SSE 仍保持 completed。
+
 ## S5-1 初版身份方案（历史记录，已被单窗口方案替代）
 
 `0005_identity` 首次加入游客、账号、Cookie 会话、会话归属校验和调用时用量归属。当时短暂实现过“用户确认后把游客会话导入账号”，并为多会话页面返回 `importable_count`。随后产品确定游客与账号必须保留各自独立的消息，因此 `/identity/import`、`importable_count` 和前端导入提示已经删除。实施记录仍保留在 Git 历史和路线图中，不能再作为当前接口说明。

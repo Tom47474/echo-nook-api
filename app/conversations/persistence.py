@@ -1,6 +1,7 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Awaitable
 from time import monotonic
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from app.llm.base import LLMProvider
 DRAFT_FLUSH_CHARS = 200
 DRAFT_FLUSH_SECONDS = 1.0
 INTERRUPTED_ERROR_CODE = "generation_interrupted"
+logger = logging.getLogger(__name__)
 
 
 def decode_sse_event(frame: str) -> tuple[str, dict[str, str]]:
@@ -79,7 +81,40 @@ async def stream_persisted_conversation(
     last_saved_at = monotonic()
     terminal_saved = False
     call_status = "cancelled"
+    call_record_attempted = False
     source = stream_conversation(request, provider)
+
+    async def await_cancel_safe(awaitable: Awaitable[None]) -> None:
+        """让关键收尾在请求取消后继续执行，再把取消信号交还给上层。"""
+        task = asyncio.create_task(awaitable)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def persist_call_once() -> None:
+        """一次流最多尝试写一条调用记录；失败只记日志，不改变对话结果。"""
+        nonlocal call_record_attempted
+        if conversation_id is None or call_record_attempted:
+            return
+        call_record_attempted = True
+        try:
+            await record_model_call(
+                manager, provider, conversation_id, purpose="reply",
+                status=call_status, assistant_message_id=assistant_message_id,
+                usage_owner_id=usage_owner_id, usage_owner_kind=usage_owner_kind,
+            )
+        except Exception:
+            # 不记录正文、Cookie 或密钥；保留资源 ID 便于定位缺失的内部观测记录。
+            logger.exception(
+                "保存模型调用记录失败",
+                extra={
+                    "conversation_id": str(conversation_id),
+                    "assistant_message_id": str(assistant_message_id),
+                    "call_status": call_status,
+                },
+            )
 
     try:
         # started 事件让后续前端能把本地临时消息与数据库 UUID、sequence 对齐。
@@ -110,6 +145,9 @@ async def stream_persisted_conversation(
                 await writer.write(content, MessageStatus.COMPLETED)
                 terminal_saved = True
                 call_status = "completed"
+                # 浏览器收到 completed 后会立即取消响应体；必须先提交 usage，
+                # 否则服务端任务可能在 finally 的数据库写入前被取消。
+                await await_cancel_safe(persist_call_once())
             elif event_name == "message.failed":
                 await writer.write(
                     content,
@@ -118,34 +156,24 @@ async def stream_persisted_conversation(
                 )
                 terminal_saved = True
                 call_status = "failed"
+                # 失败终态同样先记录调用，再把 failed 事件交给客户端。
+                await await_cancel_safe(persist_call_once())
             yield frame
     finally:
-        try:
-            # 关闭包装流时继续关闭内层模型流，确保上游 HTTP 连接及时释放。
-            await source.aclose()
-        finally:
-            if not terminal_saved:
-                # 正常完成和已编码的模型错误都会先写入终态；没有终态说明客户端
-                # 主动停止或连接被关闭，此时保留已接收正文并标记 cancelled。
-                write_task = asyncio.create_task(
-                    writer.write(content, MessageStatus.CANCELLED)
-                )
+        async def finalize_stream() -> None:
+            """关闭上游并保存取消终态与调用记录，三步必须共同抵抗请求取消。"""
+            try:
+                # 先关闭内层流，让 Provider 的 finally 填好最终耗时等指标。
+                await source.aclose()
+            finally:
                 try:
-                    # shield 防止请求取消同时打断最后一次状态落库。
-                    await asyncio.shield(write_task)
-                except asyncio.CancelledError:
-                    await write_task
-                    raise
-            if conversation_id is not None:
-                try:
-                    # 记录失败不能改变已经发送给前端的消息终态。
-                    await record_model_call(
-                        manager, provider, conversation_id, purpose="reply",
-                        status=call_status, assistant_message_id=assistant_message_id,
-                        usage_owner_id=usage_owner_id, usage_owner_kind=usage_owner_kind,
-                    )
-                except Exception:
-                    pass
+                    if not terminal_saved:
+                        # 没有终态事件说明用户停止或连接关闭；保留已接收正文。
+                        await writer.write(content, MessageStatus.CANCELLED)
+                finally:
+                    await persist_call_once()
+
+        await await_cancel_safe(finalize_stream())
 
 
 async def recover_interrupted_generations(manager: DatabaseManager) -> int:
