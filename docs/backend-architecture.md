@@ -34,7 +34,6 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供身份管理、单�
 | `.env.example` | 不含密钥的环境配置模板，默认使用演示模型。 |
 | `.gitignore` | 排除 `.env`、虚拟环境和 Python 缓存等本机文件。 |
 | `docs/database.md` | PostgreSQL 本地配置、连接、常用命令、备份、迁移约定和排错说明。 |
-| `docs/conversation-limits.md` | S5-2 游客/账号额度、频率、并发、登录保护与模型超时的运行配置手册。 |
 | `docs/conversation-technical-decisions.md` | 阶段零至当前任务的前后端技术难点、具体解决方案、代码定位和遗留边界；后续每完成一个路线图任务同步更新。 |
 | `alembic/`、`alembic.ini` | 异步数据库迁移环境、模板和版本脚本；连接地址从 `.env` 读取。 |
 | `pyproject.toml` | Python 版本、依赖和项目元数据。 |
