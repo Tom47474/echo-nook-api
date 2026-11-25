@@ -70,6 +70,8 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 前端 S3-3 首次请求 `limit=100`，用户滚到顶部或点击按钮后用 `before_sequence` 每次请求更早 50 条。前端按消息 ID 去重、修复跨页回合关系，并在插入后补偿滚动高度；服务端接口及数据库结构在本阶段未变。
 
+前端 S3-4 在用户接近消息列表底部时跟随流式新内容；向上阅读时保持位置，并提供回到底部入口。此行为只涉及前端消息列表，服务端 SSE 协议不变。
+
 `DELETE /api/v1/conversations/{id}` 成功返回 204，并由数据库级联删除消息。消息查询或删除遇到不存在的会话时返回 404，`detail.code` 为 `conversation_not_found`。UUID 格式或分页参数非法时返回 422。
 
 `POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。失败或取消的历史助手正文会附加内部中断标记。会话不存在时返回结构化 404。
