@@ -12,10 +12,22 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | `conversations`、`messages`；当前迁移版本为 `0003_conversation_summary`，会话表含摘要和覆盖序号 |
+| 业务表 | `conversations`、`messages`、`model_calls`；当前迁移版本为 `0004_model_calls` |
 | 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
+
+`model_calls` 只保存模型调用元数据，`purpose` 区分 `summary` 与 `reply`，`status` 记录服务端观察到的完成、失败或取消。`prompt_tokens`、`completion_tokens`、`total_tokens` 为供应商实际返回的用量；`NULL` 表示本次调用未取得该值，不等于 0。DBeaver 或 `psql` 可用以下只读查询检查最近调用：
+
+```sql
+SELECT created_at, purpose, status, model, duration_ms,
+       prompt_tokens, completion_tokens, total_tokens, finish_reason
+FROM model_calls
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+该表不保存提示词、回复正文或密钥；删除会话时调用记录由外键级联删除。摘要调用和主回复调用分别占一行，不能把一次对话的两次调用误当成同一笔用量。
 
 ## 当前表结构
 
@@ -208,4 +220,4 @@ APP_ENV=test .venv/bin/alembic current
 
 ### 应用启动时数据库连接失败
 
-先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0003_conversation_summary`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0004_model_calls`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。

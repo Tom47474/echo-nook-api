@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 
 from app.conversations.models import Conversation, Message, MessageRole
+from app.conversations.call_records import record_model_call
 from app.conversations.schemas import ChatMessage
 from app.conversations.service import build_database_history
 from app.db.session import DatabaseManager
@@ -54,6 +55,8 @@ async def refresh_summary(
     lines = [f"{item.role}：{item.content[:250]}" for item in canonical]
     prompt = ("既有摘要：\n" + previous + "\n\n新覆盖的旧消息：\n" + "\n".join(lines))[:4000]
     chunks: list[str] = []
+    call_status = "failed"
+    generation_failed = False
     stream = provider.stream_reply([ChatMessage(role="user", content=prompt)], SUMMARY_PROMPT)
     try:
         async for chunk in stream:
@@ -61,12 +64,19 @@ async def refresh_summary(
             if sum(map(len, chunks)) > SUMMARY_MAX_CHARS:
                 break
     except Exception:
-        return previous, through
+        generation_failed = True
     finally:
         # 提前达到长度上限时也要释放上游 SSE 连接。
         await stream.aclose()
     updated_summary = "".join(chunks).strip()
-    if not updated_summary or len(updated_summary) > SUMMARY_MAX_CHARS:
+    if not generation_failed and updated_summary and len(updated_summary) <= SUMMARY_MAX_CHARS:
+        call_status = "completed"
+    try:
+        await record_model_call(manager, provider, conversation_id, purpose="summary", status=call_status)
+    except Exception:
+        # 调用记录的写入失败不应阻断主回复或摘要回退。
+        pass
+    if generation_failed or not updated_summary or len(updated_summary) > SUMMARY_MAX_CHARS:
         return previous, through
 
     # 只允许从读取时的边界向前推进；并发请求不能用旧摘要覆盖较新摘要。

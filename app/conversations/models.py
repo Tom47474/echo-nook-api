@@ -113,3 +113,23 @@ class Message(Base):
         onupdate=func.now(),
     )
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+class ModelCall(Base):
+    """记录摘要或主回复的真实模型调用，不保存提示词、正文和密钥。"""
+
+    __tablename__ = "model_calls"
+    __table_args__ = (Index("ix_model_calls_conversation_created", "conversation_id", "created_at"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
+    conversation_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    assistant_message_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

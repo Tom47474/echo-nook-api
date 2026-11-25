@@ -3,9 +3,9 @@ import unittest
 from uuid import UUID
 
 import httpx
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
-from app.conversations.models import Conversation, Message, MessageStatus
+from app.conversations.models import Conversation, Message, MessageStatus, ModelCall
 from app.conversations.persistence import (
     INTERRUPTED_ERROR_CODE,
     recover_interrupted_generations,
@@ -15,6 +15,7 @@ from app.conversations.repository import ConversationRepository
 from app.conversations.schemas import StreamMessageRequest
 from app.core.config import get_settings
 from app.db.session import DatabaseManager
+from app.llm.metrics import LLMCallMetrics
 
 
 class ConversationPersistenceTests(unittest.IsolatedAsyncioTestCase):
@@ -90,6 +91,36 @@ class ConversationPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant.content, "失败前的部分正文")
         self.assertEqual(assistant.error_code, "provider_timeout")
 
+    async def test_failed_call_records_known_fields_without_inventing_usage(self) -> None:
+        user_id, assistant_id, user_sequence, assistant_sequence = await self.create_turn()
+        conversation_id = (await self.read_message(assistant_id)).conversation_id
+
+        class FailingProvider:
+            last_call_metrics = None
+
+            async def stream_reply(self, messages, system_prompt):
+                self.last_call_metrics = LLMCallMetrics(model="known-model", duration_ms=12)
+                request = httpx.Request("POST", "https://model.example/chat")
+                raise httpx.ReadTimeout("timeout", request=request)
+                yield ""
+
+        stream = stream_persisted_conversation(
+            StreamMessageRequest(message="测试问题"), FailingProvider(), self.manager,
+            user_message_id=user_id, assistant_message_id=assistant_id,
+            user_sequence=user_sequence, assistant_sequence=assistant_sequence,
+            conversation_id=conversation_id,
+        )
+        _ = [event async for event in stream]
+        async with self.manager.session() as session:
+            records = list((await session.scalars(select(ModelCall).where(
+                ModelCall.conversation_id == conversation_id,
+            ))).all())
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "failed")
+        self.assertEqual(records[0].model, "known-model")
+        self.assertIsNone(records[0].prompt_tokens)
+        self.assertIsNone(records[0].finish_reason)
+
     async def test_closing_stream_saves_cancelled_partial_text(self) -> None:
         user_id, assistant_id, user_sequence, assistant_sequence = (
             await self.create_turn()
@@ -118,6 +149,32 @@ class ConversationPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant.status, MessageStatus.CANCELLED.value)
         self.assertEqual(assistant.content, "用户停止前的正文")
         self.assertIsNone(assistant.error_code)
+
+    async def test_cancelled_call_records_status_with_unknown_usage(self) -> None:
+        user_id, assistant_id, user_sequence, assistant_sequence = await self.create_turn()
+        conversation_id = (await self.read_message(assistant_id)).conversation_id
+
+        class SlowProvider:
+            last_call_metrics = None
+
+            async def stream_reply(self, messages, system_prompt):
+                self.last_call_metrics = LLMCallMetrics(model="known-model", duration_ms=8)
+                yield "部分正文"
+                await asyncio.sleep(60)
+
+        stream = stream_persisted_conversation(
+            StreamMessageRequest(message="测试问题"), SlowProvider(), self.manager,
+            user_message_id=user_id, assistant_message_id=assistant_id,
+            user_sequence=user_sequence, assistant_sequence=assistant_sequence,
+            conversation_id=conversation_id,
+        )
+        await anext(stream)
+        await anext(stream)
+        await stream.aclose()
+        async with self.manager.session() as session:
+            record = await session.scalar(select(ModelCall).where(ModelCall.conversation_id == conversation_id))
+        self.assertEqual(record.status, "cancelled")
+        self.assertIsNone(record.total_tokens)
 
     async def test_closing_after_started_still_marks_cancelled(self) -> None:
         user_id, assistant_id, user_sequence, assistant_sequence = (

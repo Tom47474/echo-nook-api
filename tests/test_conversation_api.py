@@ -11,12 +11,14 @@ from app.conversations.models import (
     Message,
     MessageRole,
     MessageStatus,
+    ModelCall,
 )
 from app.conversations.service import current_input_tokens
 from app.conversations.repository import ConversationRepository
 from app.conversations.summary import refresh_summary, summary_source
 from app.core.config import Settings
 from app.main import create_app, lifespan
+from app.llm.metrics import LLMCallMetrics
 
 
 class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
@@ -72,7 +74,13 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         calls: list[tuple[list, str]] = []
 
         class RecordingProvider:
+            last_call_metrics = None
+
             async def stream_reply(self, messages, system_prompt):
+                self.last_call_metrics = LLMCallMetrics(
+                    model="recorded-model", duration_ms=15, prompt_tokens=30,
+                    completion_tokens=10, total_tokens=40, finish_reason="stop",
+                )
                 calls.append((messages, system_prompt))
                 yield "较早对话摘要" if "压缩" in system_prompt else "正常回答"
 
@@ -87,6 +95,12 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("较早对话摘要", calls[1][1])
         self.assertNotIn("第 0 回合", str(calls[1][0]))
         self.assertIn("第 3 回合", str(calls[1][0]))
+        async with self.app.state.database_manager.session() as session:
+            records = list((await session.scalars(
+                select(ModelCall).where(ModelCall.conversation_id == conversation_id)
+            )).all())
+        self.assertEqual({record.purpose for record in records}, {"summary", "reply"})
+        self.assertTrue(all(record.total_tokens == 40 for record in records))
 
     async def asyncSetUp(self) -> None:
         settings = Settings(app_env="test")

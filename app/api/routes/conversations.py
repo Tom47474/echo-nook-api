@@ -188,6 +188,9 @@ async def stream_conversation_message(
         current_message=request.message,
         context_summary=summary,
     )
+    # 同一 Provider 先后服务摘要和主回复；主流尚未开始就断开时不能复用摘要指标。
+    if hasattr(provider, "last_call_metrics"):
+        provider.last_call_metrics = None
     stream_request = StreamMessageRequest(message=request.message, history=history, context_summary=summary)
     events = stream_persisted_conversation(
         stream_request,
@@ -197,6 +200,7 @@ async def stream_conversation_message(
         assistant_message_id=assistant_message_id,
         user_sequence=user_sequence,
         assistant_sequence=assistant_sequence,
+        conversation_id=conversation_id,
     )
     return create_streaming_response(events)
 

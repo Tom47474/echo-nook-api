@@ -52,6 +52,8 @@ DELETE /api/v1/conversations/{id}
 
 长对话在真实模型模式下按需更新会话摘要：保留最近 10 个问答回合原文，每次最多将更早的 3 个回合并入摘要；摘要和近期原文共同进入模型上下文，失败时回退到原文。摘要生成会额外调用一次模型，摘要只用于服务端上下文，不作为消息展示。首次使用前执行 `.venv/bin/alembic upgrade head`（测试库使用 `APP_ENV=test`）。
 
+S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。升级服务前需先执行 `alembic upgrade head` 到 `0004_model_calls`。
+
 前端使用 `/?conversation=<会话UUID>` 保存当前会话。直接打开链接时通过单会话查询验证 ID 并恢复消息；已删除或无效的链接会回退最近会话并提示。首次读取最新 100 条消息，滚到顶部或点击按钮后使用 `before_sequence` 每次加载更早 50 条。
 
 新接口首先发送 `message.started`，其中包含用户/助手消息 UUID 和 sequence；随后发送原有的 `message.delta`、`message.completed` 或 `message.failed`。处理新分片时，如果草稿累计新增 200 字符或距上次保存已达 1 秒，就执行一次检查点保存；最终事件前再完整保存。

@@ -295,3 +295,25 @@ S4-1 按预算选最近的完整回合；对长会话而言，较早的用户偏
 ### 验证和运行步骤
 
 测试覆盖摘要触发边界、覆盖序号持久化、生成失败保持旧摘要，以及真实路由将摘要作为系统背景信息、将近期原文交给主模型。服务端 39 项测试通过；本地开发库和测试库均执行 `alembic upgrade head` 到 `0003_conversation_summary`，两个环境的 `alembic check` 均无差异。其他环境须在运行新代码前迁移；后续 S4-4 再记录摘要调用和主回复调用各自的模型、耗时与真实用量。
+
+## S4-4：记录模型调用信息与真实用量（已完成）
+
+### 难点一：流式正文和最终用量不在同一个事件中
+
+主回复和摘要都通过方舟 Chat Completions 流式接口生成。普通片段的 `choices[0].delta.content` 提供可展示正文；用量可能只在流结束前的额外片段中出现，且这个片段的 `choices=[]`。旧 [OpenAICompatibleProvider](../app/llm/openai_compatible.py) 在 `choices` 为空时直接跳过，因而即使供应商提供 `usage` 也无法记录。适配器现在显式发送 `stream_options.include_usage=true`，先读取每个事件里的模型名，只把尾块或带结束原因的终块中非空的 `usage.prompt_tokens/completion_tokens/total_tokens` 视为最终用量；中间片段的累计值不能冒充整次调用总量。随后从选择项中读取非空 `finish_reason` 和正文。用量尾块不变成前端 `message.delta`。解析只接受非负整数；字段缺失时保持 `None`，不把 S4-1 的字节估算写成真实 token。
+
+### 难点二：两次模型调用必须分别归因
+
+长会话可能先调用模型生成摘要，再调用模型生成最终回答。两次调用的提示词、耗时与 token 用量不同，不能合并成一次，也不能把摘要用量算到主回复上。迁移 [0004_model_calls.py](../alembic/versions/0004_model_calls.py) 增加 `model_calls` 表，每行保存会话 ID、可选的助手消息 ID、`purpose=summary|reply`、服务端结束状态、实际模型名、耗时、可取得的用量和供应商 `finish_reason`。没有提示词、回复正文或 API Key 字段；删除会话时外键级联清理这些记录。
+
+适配器在真实请求开始时创建 [LLMCallMetrics](../app/llm/metrics.py)，用单调时钟测量直到上游流关闭的时间；异常或取消也会在 `finally` 写入已测得的毫秒数。摘要流结束后，[refresh_summary()](../app/conversations/summary.py) 写入一条 `summary` 记录；主回复由 [stream_persisted_conversation()](../app/conversations/persistence.py) 在消息终态确定、模型流关闭后写入 `reply` 记录。调用记录使用独立短事务，不延长模型流期间的数据库事务。演示 Provider 没有真实模型调用信息，因此不创建 `model_calls` 行。
+
+### 难点三：失败、主动停止和缺失尾块不能伪造数据
+
+服务端的 `status` 由实际链路决定：正常结束是 `completed`，供应商或生成错误是 `failed`，用户停止或连接关闭是 `cancelled`；这与供应商的 `finish_reason` 是两个不同字段。供应商可能在中途断流、超时或用户取消时没有发出用量尾块，也可能只提供部分字段；这时所有未得到的 token 值及 `finish_reason` 保持数据库 `NULL`。即使已收到部分正文，也不从文字长度倒推出真实用量。摘要失败时依旧按 S4-3 的策略回退到已保存摘要或近期原文；调用记录写入出错不能改变已经保存的消息终态或向前端发送的 SSE 结果。
+
+例如一次长会话触发摘要，模型先用 30 个输入 token、10 个输出 token 生成摘要，再用另一份上下文生成回答；数据库会有两行，分别对应 `summary` 与 `reply`。若主回复在读到用量尾块前被停止，主回复行可为 `cancelled`，已知模型和耗时仍可保留，用量保持 `NULL`。不能把摘要行的 40 token 填入主回复行，也不能把估算预算当作它的用量。
+
+### 验证和运行边界
+
+测试覆盖 `choices=[]` 用量尾块、`finish_reason` 和实际模型名、缺失用量保留空值、摘要与主回复两条记录，以及失败和取消调用的已知字段与未知字段。服务端 42 项测试通过；本地开发库与测试库均升级到 `0004_model_calls`，两个环境的 `alembic check` 均无差异。可用 [数据库指南](database.md) 中的只读 SQL 在 DBeaver 查看最近调用。当前不提供面向前端的用量查询接口；阶段五的身份归属完成前，不应开放按会话查看内部调用记录的公共接口。

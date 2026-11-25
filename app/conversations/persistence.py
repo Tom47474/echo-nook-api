@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, update
 
 from app.conversations.models import Conversation, Message, MessageRole, MessageStatus
+from app.conversations.call_records import record_model_call
 from app.conversations.repository import ConversationRepository
 from app.conversations.schemas import StreamMessageRequest
 from app.conversations.service import encode_event, stream_conversation
@@ -67,6 +68,7 @@ async def stream_persisted_conversation(
     assistant_message_id: UUID,
     user_sequence: int,
     assistant_sequence: int,
+    conversation_id: UUID | None = None,
 ) -> AsyncIterator[str]:
     """转发模型 SSE，同时保存草稿及 completed/failed/cancelled 终态。"""
     writer = AssistantMessageWriter(manager, assistant_message_id)
@@ -74,6 +76,7 @@ async def stream_persisted_conversation(
     saved_length = 0
     last_saved_at = monotonic()
     terminal_saved = False
+    call_status = "cancelled"
     source = stream_conversation(request, provider)
 
     try:
@@ -104,6 +107,7 @@ async def stream_persisted_conversation(
             elif event_name == "message.completed":
                 await writer.write(content, MessageStatus.COMPLETED)
                 terminal_saved = True
+                call_status = "completed"
             elif event_name == "message.failed":
                 await writer.write(
                     content,
@@ -111,6 +115,7 @@ async def stream_persisted_conversation(
                     error_code=payload.get("code") or "generation_failed",
                 )
                 terminal_saved = True
+                call_status = "failed"
             yield frame
     finally:
         try:
@@ -129,6 +134,15 @@ async def stream_persisted_conversation(
                 except asyncio.CancelledError:
                     await write_task
                     raise
+            if conversation_id is not None:
+                try:
+                    # 记录失败不能改变已经发送给前端的消息终态。
+                    await record_model_call(
+                        manager, provider, conversation_id, purpose="reply",
+                        status=call_status, assistant_message_id=assistant_message_id,
+                    )
+                except Exception:
+                    pass
 
 
 async def recover_interrupted_generations(manager: DatabaseManager) -> int:
