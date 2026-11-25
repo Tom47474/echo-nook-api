@@ -17,7 +17,7 @@ python3.14 -m venv .venv
 
 S5-1 后浏览器先调用 `POST /api/v1/identity/bootstrap` 建立游客身份，再携带服务端签发的 HttpOnly Cookie 访问会话接口。账号可通过用户名和密码注册/登录；登录后直接显示账号的独立窗口，退出后恢复该浏览器的游客窗口；两者消息不会合并。直接用 curl 调试会话接口时也需要保留 Cookie，例如 `curl -c /tmp/echo-nook-cookies -b /tmp/echo-nook-cookies -X POST http://localhost:8000/api/v1/identity/bootstrap`，后续请求加 `-b /tmp/echo-nook-cookies`。旧版无归属会话的本地恢复方式见 [数据库指南](docs/database.md)。
 
-身份接口包括 `POST /api/v1/identity/bootstrap`、`/register`、`/login` 和 `/logout`。注册/登录接收 `{"username":"...","password":"..."}`；旧游客导入接口已移除。游客和账号均可使用会话接口，但只能访问本身份的会话。账号密码找回、登录失败限流和正式部署联调仍属于阶段五后续工作。
+身份接口包括 `POST /api/v1/identity/bootstrap`、`/register`、`/login` 和 `/logout`。注册/登录接收 `{"username":"...","password":"..."}`；旧游客导入接口已移除。游客和账号均可使用会话接口，但只能访问本身份的会话。账号密码找回和正式部署联调仍属于阶段五后续工作。
 
 ## 试用流式接口
 
@@ -58,6 +58,8 @@ DELETE /api/v1/conversations/{id}
 长对话在真实模型模式下按需更新会话摘要：保留最近 10 个问答回合原文，每次最多将更早的 3 个回合并入摘要；摘要和近期原文共同进入模型上下文，失败时回退到原文。摘要生成会额外调用一次模型，摘要只用于服务端上下文，不作为消息展示。首次使用前执行 `.venv/bin/alembic upgrade head`（测试库使用 `APP_ENV=test`）。
 
 S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。当前数据库版本为 `0006_single_window`；升级服务前先执行 `alembic upgrade head`。
+
+当前产品策略为游客和登录账号均免费使用，不设置用户级次数、Token、分钟频率或并发额度，也没有登录失败限流配置。`model_calls` 的 usage 和调用时身份快照只用于内部成本观察与故障排查，不会拒绝用户请求，前端也不展示额度。曾实现的 S5-2 限额方案已撤销，原因和保留边界见[技术难点文档](docs/conversation-technical-decisions.md#s5-2用户额度与调用限制已撤销)。
 
 前端不再在 URL 保存会话 ID。刷新页面时按当前游客或账号身份读取唯一窗口及其消息。首次读取最新 100 条消息，滚到顶部或点击按钮后使用 `before_sequence` 每次加载更早 50 条。
 
