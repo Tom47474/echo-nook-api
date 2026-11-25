@@ -38,6 +38,9 @@ async def refresh_summary(
     provider: LLMProvider,
     conversation_id: UUID,
     messages: Sequence[Message],
+    *,
+    usage_owner_id: UUID | None = None,
+    usage_owner_kind: str | None = None,
 ) -> tuple[str, int]:
     """按需生成摘要；模型或数据库更新失败时返回已保存版本，不阻断主回复。"""
     async with manager.session() as session:
@@ -72,7 +75,10 @@ async def refresh_summary(
     if not generation_failed and updated_summary and len(updated_summary) <= SUMMARY_MAX_CHARS:
         call_status = "completed"
     try:
-        await record_model_call(manager, provider, conversation_id, purpose="summary", status=call_status)
+        await record_model_call(
+            manager, provider, conversation_id, purpose="summary", status=call_status,
+            usage_owner_id=usage_owner_id, usage_owner_kind=usage_owner_kind,
+        )
     except Exception:
         # 调用记录的写入失败不应阻断主回复或摘要回退。
         pass

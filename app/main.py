@@ -37,7 +37,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.frontend_origin],
-        allow_credentials=False,
+        # 浏览器以 HttpOnly Cookie 携带游客或登录会话，跨端口请求必须允许凭证。
+        allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
     )

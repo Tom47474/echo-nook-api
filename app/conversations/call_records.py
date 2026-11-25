@@ -16,6 +16,8 @@ async def record_model_call(
     purpose: str,
     status: str,
     assistant_message_id: UUID | None = None,
+    usage_owner_id: UUID | None = None,
+    usage_owner_kind: str | None = None,
 ) -> None:
     """仅记录真实适配器已开始的调用；未知用量保留 NULL。"""
     metrics = getattr(provider, "last_call_metrics", None)
@@ -33,5 +35,7 @@ async def record_model_call(
             completion_tokens=metrics.completion_tokens,
             total_tokens=metrics.total_tokens,
             finish_reason=metrics.finish_reason,
+            usage_owner_id=usage_owner_id,
+            usage_owner_kind=usage_owner_kind,
         ))
         await session.commit()

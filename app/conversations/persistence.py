@@ -69,6 +69,8 @@ async def stream_persisted_conversation(
     user_sequence: int,
     assistant_sequence: int,
     conversation_id: UUID | None = None,
+    usage_owner_id: UUID | None = None,
+    usage_owner_kind: str | None = None,
 ) -> AsyncIterator[str]:
     """转发模型 SSE，同时保存草稿及 completed/failed/cancelled 终态。"""
     writer = AssistantMessageWriter(manager, assistant_message_id)
@@ -140,6 +142,7 @@ async def stream_persisted_conversation(
                     await record_model_call(
                         manager, provider, conversation_id, purpose="reply",
                         status=call_status, assistant_message_id=assistant_message_id,
+                        usage_owner_id=usage_owner_id, usage_owner_kind=usage_owner_kind,
                     )
                 except Exception:
                     pass

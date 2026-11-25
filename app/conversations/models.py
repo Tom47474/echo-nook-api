@@ -37,12 +37,12 @@ class Conversation(Base):
 
     __tablename__ = "conversations"
     __table_args__ = (
-        # owner_id 在 S5-1 接入身份前允许为空，提前预留可避免后续重构会话边界。
+        # 旧版会话可能没有归属；S5-1 起新会话必须由路由写入当前身份并按该字段授权。
         Index("ix_conversations_owner_updated_at", "owner_id", "updated_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
-    owner_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    owner_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("principals.id", name="fk_conversations_owner_id"), nullable=True)
     title: Mapped[str] = mapped_column(
         String(200),
         nullable=False,
@@ -69,6 +69,27 @@ class Conversation(Base):
         passive_deletes=True,
         order_by="Message.sequence",
     )
+
+
+class Principal(Base):
+    """游客或账号的服务端身份；浏览器不能自行指定主键。"""
+
+    __tablename__ = "principals"
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class IdentitySession(Base):
+    """只保存随机会话凭证的哈希，泄露数据库也不会直接得到 Cookie。"""
+
+    __tablename__ = "identity_sessions"
+    __table_args__ = (Index("ix_identity_sessions_principal_id", "principal_id"),)
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    principal_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Message(Base):
@@ -132,4 +153,7 @@ class ModelCall(Base):
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 调用时快照不随游客会话导入而改写；历史 NULL 表示上线身份前无法可靠归因。
+    usage_owner_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    usage_owner_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

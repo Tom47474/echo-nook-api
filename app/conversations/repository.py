@@ -17,20 +17,21 @@ class ConversationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, title: str) -> Conversation:
+    async def create(self, title: str, *, owner_id: UUID | None = None) -> Conversation:
         """创建会话但不提交事务，由调用接口统一决定提交时机。"""
-        conversation = Conversation(title=title)
+        conversation = Conversation(title=title, owner_id=owner_id)
         self.session.add(conversation)
         # flush 用于取得 UUID 和服务端时间，commit 仍由接口事务边界负责。
         await self.session.flush()
         await self.session.refresh(conversation)
         return conversation
 
-    async def list(self, *, offset: int, limit: int) -> tuple[list[Conversation], int]:
+    async def list(self, *, offset: int, limit: int, owner_id: UUID | None = None) -> tuple[list[Conversation], int]:
         """按最近更新时间倒序返回会话列表和未分页的总数。"""
-        total = await self.session.scalar(select(func.count()).select_from(Conversation))
+        total = await self.session.scalar(select(func.count()).select_from(Conversation).where(Conversation.owner_id == owner_id))
         result = await self.session.scalars(
             select(Conversation)
+            .where(Conversation.owner_id == owner_id)
             # 时间相同时使用 UUID 作为稳定排序键，防止分页结果漂移。
             .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
             .offset(offset)
@@ -38,16 +39,16 @@ class ConversationRepository:
         )
         return list(result), total or 0
 
-    async def exists(self, conversation_id: UUID) -> bool:
+    async def exists(self, conversation_id: UUID, *, owner_id: UUID | None = None) -> bool:
         """只查询主键判断会话是否存在，避免加载无关字段。"""
         found = await self.session.scalar(
-            select(Conversation.id).where(Conversation.id == conversation_id)
+            select(Conversation.id).where(Conversation.id == conversation_id, Conversation.owner_id == owner_id)
         )
         return found is not None
 
-    async def get(self, conversation_id: UUID) -> Conversation | None:
+    async def get(self, conversation_id: UUID, *, owner_id: UUID | None = None) -> Conversation | None:
         """按主键读取单个会话，供直接打开 URL 时验证并取得标题。"""
-        return await self.session.get(Conversation, conversation_id)
+        return await self.session.scalar(select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == owner_id))
 
     async def list_messages(
         self,
@@ -55,9 +56,14 @@ class ConversationRepository:
         *,
         before_sequence: int | None,
         limit: int,
+        owner_id: UUID | None = None,
     ) -> tuple[list[Message], bool, int | None]:
         """使用 sequence 游标读取最新一页，并返回下一页信息。"""
-        statement = select(Message).where(Message.conversation_id == conversation_id)
+        # 在实际读取 SQL 中再次校验归属，避免检查与查询之间发生导入转移。
+        statement = (
+            select(Message).join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Message.conversation_id == conversation_id, Conversation.owner_id == owner_id)
+        )
         if before_sequence is not None:
             statement = statement.where(Message.sequence < before_sequence)
 
@@ -71,9 +77,12 @@ class ConversationRepository:
         next_before_sequence = page[0].sequence if has_more and page else None
         return page, has_more, next_before_sequence
 
-    async def delete(self, conversation_id: UUID) -> bool:
+    async def delete(self, conversation_id: UUID, *, owner_id: UUID | None = None) -> bool:
         """删除会话；不存在返回 False，消息由数据库外键级联删除。"""
-        conversation = await self.session.get(Conversation, conversation_id)
+        # 删除与游客导入并发时锁住会话行；归属变化后的旧身份不能继续删除。
+        conversation = await self.session.scalar(
+            select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == owner_id).with_for_update()
+        )
         if conversation is None:
             return False
         # 消息删除交给 PostgreSQL 的 ON DELETE CASCADE，避免逐条删除。
@@ -85,11 +94,13 @@ class ConversationRepository:
         self,
         conversation_id: UUID,
         content: str,
+        *,
+        owner_id: UUID | None = None,
     ) -> tuple[Message, Message] | None:
         """在同一行锁事务中创建用户消息和助手流式占位消息。"""
         conversation = await self.session.scalar(
             select(Conversation)
-            .where(Conversation.id == conversation_id)
+            .where(Conversation.id == conversation_id, Conversation.owner_id == owner_id)
             .with_for_update()
         )
         if conversation is None:

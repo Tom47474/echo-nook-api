@@ -80,6 +80,8 @@ S4-3 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。�
 
 S4-4 增加 `model_calls` 表，按 `purpose=summary|reply` 区分两次真实模型调用。方舟流式请求设置 `stream_options.include_usage=true`，适配器解析可能出现在 `choices=[]` 尾块中的 `usage`，同时读取模型名和 `finish_reason`；模型流关闭时记录耗时。结束状态按服务端实际结果保存为 `completed/failed/cancelled`。供应商未返回的 token 字段及结束原因保持 `NULL`，不使用估算值或推断值替代；演示 Provider 不生成真实调用记录。调用记录不包含密钥和对话正文，写入失败不会修改对话消息的终态。新代码需要迁移到 `0004_model_calls`。
 
+S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cookie 的哈希）表。浏览器先调用 `/api/v1/identity/bootstrap`；注册、登录、退出和确认导入由 `/api/v1/identity/*` 处理。所有会话 REST 与 SSE 接口从 Cookie 解析身份并按 `owner_id` 校验；对非本人会话返回 404。登录不会自动导入游客会话，用户确认后才在事务中转移 `owner_id`；`model_calls` 的调用时用量归属快照保持不变。前端不展示 token。生产环境需要同站 HTTPS Cookie 部署，服务端允许配置的前端 Origin 携带凭证；新代码需要迁移到 `0005_identity`。
+
 新流首先发送 `message.started`，携带两条消息的 UUID 和 sequence，供前端把临时消息与数据库记录对齐。正文仍通过 `message.delta` 发送；`message.completed` 发送前保存完整正文和 `completed`，`message.failed` 发送前保存部分正文、`failed` 和结构化 `error_code`。客户端中断或外层生成器关闭时保存 `cancelled`。
 
 草稿不是逐 token 写库：收到新分片时，若累计新增 200 字符或距上次保存达到 1 秒，就使用独立短事务更新 `streaming` 正文。模型流期间不长期持有数据库连接。进程被强制终止时，可能丢失最近一个检查点之后的草稿；下次单进程应用启动会把遗留的 `assistant/streaming` 更新为 `failed`，错误码为 `generation_interrupted`。

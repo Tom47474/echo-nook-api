@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversations.persistence import stream_persisted_conversation
-from app.conversations.models import Message
+from app.conversations.models import Message, Principal
 from app.conversations.repository import ConversationRepository
 from app.conversations.summary import refresh_summary
 from app.conversations.schemas import (
@@ -22,6 +22,7 @@ from app.conversations.service import (
 )
 from app.core.config import Settings
 from app.core.dependencies import get_app_settings
+from app.core.identity import require_identity
 from app.db.dependencies import get_database_manager, get_db_session
 from app.db.session import DatabaseManager
 from app.llm.factory import create_llm_provider
@@ -41,10 +42,11 @@ def conversation_not_found() -> HTTPException:
 async def create_conversation(
     payload: ConversationCreate,
     session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
 ) -> ConversationRead:
     """创建一个空会话，返回后可使用会话 ID 发送流式消息。"""
     repository = ConversationRepository(session)
-    conversation = await repository.create(payload.title)
+    conversation = await repository.create(payload.title, owner_id=identity.id)
     # 写接口显式提交；提交前抛出的异常由 Session 上下文统一回滚。
     await session.commit()
     return ConversationRead.model_validate(conversation)
@@ -55,9 +57,10 @@ async def list_conversations(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
 ) -> ConversationList:
-    """分页列出全部会话，当前阶段尚未按用户身份过滤。"""
-    items, total = await ConversationRepository(session).list(offset=offset, limit=limit)
+    """只列出当前游客或账号拥有的会话。"""
+    items, total = await ConversationRepository(session).list(offset=offset, limit=limit, owner_id=identity.id)
     return ConversationList(items=items, total=total, offset=offset, limit=limit)
 
 
@@ -65,9 +68,10 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: UUID,
     session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
 ) -> ConversationRead:
     """通过 URL 中的会话 ID 查询会话，不依赖列表前 100 条是否包含它。"""
-    conversation = await ConversationRepository(session).get(conversation_id)
+    conversation = await ConversationRepository(session).get(conversation_id, owner_id=identity.id)
     if conversation is None:
         raise conversation_not_found()
     return ConversationRead.model_validate(conversation)
@@ -79,15 +83,17 @@ async def list_conversation_messages(
     before_sequence: int | None = Query(default=None, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
 ) -> MessagePage:
     """按 sequence 游标读取会话消息，响应始终保持时间正序。"""
     repository = ConversationRepository(session)
-    if not await repository.exists(conversation_id):
+    if not await repository.exists(conversation_id, owner_id=identity.id):
         raise conversation_not_found()
     items, has_more, next_before_sequence = await repository.list_messages(
         conversation_id,
         before_sequence=before_sequence,
         limit=limit,
+        owner_id=identity.id,
     )
     return MessagePage(
         items=items,
@@ -101,9 +107,10 @@ async def list_conversation_messages(
 async def delete_conversation(
     conversation_id: UUID,
     session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
 ) -> Response:
     """删除会话及其全部消息；不存在时返回结构化 404。"""
-    if not await ConversationRepository(session).delete(conversation_id):
+    if not await ConversationRepository(session).delete(conversation_id, owner_id=identity.id):
         raise conversation_not_found()
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -127,6 +134,7 @@ async def stream_conversation_message(
     session: AsyncSession = Depends(get_db_session),
     manager: DatabaseManager = Depends(get_database_manager),
     settings: Settings = Depends(get_app_settings),
+    identity: Principal = Depends(require_identity),
 ) -> StreamingResponse:
     """创建完整回合、加载数据库历史，并持久化助手流式状态。"""
     # 在写入回合之前校验当前问题；过长输入不能留下无法生成的占位消息。
@@ -140,10 +148,13 @@ async def stream_conversation_message(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "input_budget_exceeded", "message": "当前问题超过模型输入预算，请缩短后重试"},
         )
+    # 后续 commit/rollback 会使身份 ORM 对象过期；先提取调用归属快照。
+    identity_id, identity_kind = identity.id, identity.kind
     repository = ConversationRepository(session)
     turn = await repository.start_turn(
         conversation_id,
         request.message,
+        owner_id=identity_id,
     )
     if turn is None:
         raise conversation_not_found()
@@ -176,7 +187,10 @@ async def stream_conversation_message(
     summary, covered_sequence = ("", -1)
     if settings.llm_provider == "openai_compatible":
         try:
-            summary, covered_sequence = await refresh_summary(manager, provider, conversation_id, history_snapshot)
+            summary, covered_sequence = await refresh_summary(
+                manager, provider, conversation_id, history_snapshot,
+                usage_owner_id=identity_id, usage_owner_kind=identity_kind,
+            )
         except Exception:
             # 摘要是增强功能；读取或更新失败时仍用近期原文完成本次问答。
             summary, covered_sequence = "", -1
@@ -201,6 +215,8 @@ async def stream_conversation_message(
         user_sequence=user_sequence,
         assistant_sequence=assistant_sequence,
         conversation_id=conversation_id,
+        usage_owner_id=identity_id,
+        usage_owner_kind=identity_kind,
     )
     return create_streaming_response(events)
 
@@ -209,6 +225,7 @@ async def stream_conversation_message(
 async def stream_message(
     request: StreamMessageRequest,
     settings: Settings = Depends(get_app_settings),
+    identity: Principal = Depends(require_identity),
 ) -> StreamingResponse:
     """兼容旧前端：历史仍由客户端传入，S3 前保持该接口可用。"""
     provider = create_llm_provider(settings)

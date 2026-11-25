@@ -12,6 +12,7 @@ from app.conversations.models import (
     MessageRole,
     MessageStatus,
     ModelCall,
+    Principal,
 )
 from app.conversations.service import current_input_tokens
 from app.conversations.repository import ConversationRepository
@@ -101,6 +102,7 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
             )).all())
         self.assertEqual({record.purpose for record in records}, {"summary", "reply"})
         self.assertTrue(all(record.total_tokens == 40 for record in records))
+        self.assertTrue(all(record.usage_owner_id == self.guest_id and record.usage_owner_kind == "guest" for record in records))
 
     async def asyncSetUp(self) -> None:
         settings = Settings(app_env="test")
@@ -113,6 +115,9 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=self.app)
         self.client = httpx.AsyncClient(transport=transport, base_url="http://test")
         self.created_ids: list[UUID] = []
+        bootstrap = await self.client.post("/api/v1/identity/bootstrap")
+        self.assertEqual(bootstrap.status_code, 200)
+        self.guest_id = UUID(bootstrap.json()["id"])
 
     async def asyncTearDown(self) -> None:
         # 只清理本测试创建的数据，避免运行测试时删除开发者保留的其他测试数据。
@@ -121,6 +126,11 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
                 await session.execute(
                     delete(Conversation).where(Conversation.id.in_(self.created_ids))
                 )
+                await session.commit()
+        async with self.app.state.database_manager.session() as session:
+            guest = await session.get(Principal, self.guest_id)
+            if guest is not None:
+                await session.delete(guest)
                 await session.commit()
         await self.client.aclose()
         await self.lifespan.__aexit__(None, None, None)

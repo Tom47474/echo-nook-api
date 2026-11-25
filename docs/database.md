@@ -12,7 +12,7 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | `conversations`、`messages`、`model_calls`；当前迁移版本为 `0004_model_calls` |
+| 业务表 | `principals`、`identity_sessions`、`conversations`、`messages`、`model_calls`；当前迁移版本为 `0005_identity` |
 | 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
@@ -34,8 +34,8 @@ LIMIT 20;
 `conversations` 保存会话容器：
 
 - UUIDv7 `id`、标题、创建时间和更新时间。
-- 可空 `owner_id` 为后续用户归属预留；当前不能作为权限控制依据。
-- `(owner_id, updated_at)` 索引用于后续按用户列出最近会话。
+- `owner_id` 关联 `principals.id`，会话接口按当前游客或账号身份过滤；旧数据仍可能为 `NULL`，不能被任意新身份访问。
+- `(owner_id, updated_at)` 索引用于按身份列出最近会话。
 
 `messages` 保存会话内消息：
 
@@ -45,7 +45,7 @@ LIMIT 20;
 - 角色只允许 `user`、`assistant`；状态只允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。
 - 删除会话时由 PostgreSQL 外键级联删除对应消息。
 
-在 DBeaver 中右键 `Schemas > public > Tables` 并选择刷新，即可看到 `alembic_version`、`conversations` 和 `messages`。表已经存在不代表助手回复已经完整保存；助手流式状态将在 S2-5 接入。
+在 DBeaver 中右键 `Schemas > public > Tables` 并选择刷新，即可看到 `alembic_version`、`principals`、`identity_sessions`、`conversations`、`messages` 和 `model_calls`。助手消息的 `status` 可用于区分生成中、完成、失败与取消。
 
 阶段二现已完整接入会话创建、列表、删除、消息分页和流式持久化。一个回合会连续写入 `user/completed` 与 `assistant/streaming`，同一会话并发发送时通过会话行锁分配唯一 sequence。处理新分片时，助手正文按新增 200 字符或距上次保存 1 秒执行检查点，最终变为 `completed`、`failed` 或 `cancelled`；失败时 `error_code` 保存结构化原因。不要在 DBeaver 中手工修改状态来代替业务流程。
 
@@ -220,4 +220,15 @@ APP_ENV=test .venv/bin/alembic current
 
 ### 应用启动时数据库连接失败
 
-先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0004_model_calls`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0005_identity`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
+
+### 开发库旧会话认领
+
+身份功能上线前的会话 `owner_id` 为 `NULL`，新接口不会把它们自动交给第一个访问者。本地开发库目前有 1 个这样的会话，记录未被删除。先启动前后端，在浏览器 Network 面板查看 `POST /api/v1/identity/bootstrap` 的响应 `id`，确认这是自己的游客身份。然后在服务端仓库运行下面两条命令，第二条只有确认目标身份后才执行：
+
+```bash
+.venv/bin/python -m app.scripts.claim_legacy --owner <bootstrap 返回的 id>
+.venv/bin/python -m app.scripts.claim_legacy --owner <bootstrap 返回的 id> --apply
+```
+
+命令只允许 `APP_ENV=development`，默认仅预览数量；执行时只认领仍为 `NULL` 的旧会话，不改动已有归属。刷新前端即可看到被认领的历史。测试库和正式库不得用此开发命令；部署时应分别规划可信的历史归属迁移。

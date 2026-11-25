@@ -15,12 +15,17 @@ python3.14 -m venv .venv
 
 如果已激活 `.venv`，可把命令中的 `.venv/bin/python` 换成 `python`。打开 <http://localhost:8000/docs> 查看交互式接口文档，或访问 <http://localhost:8000/health> 检查服务。
 
+S5-1 后浏览器先调用 `POST /api/v1/identity/bootstrap` 建立游客身份，再携带服务端签发的 HttpOnly Cookie 访问会话接口。账号可通过用户名和密码注册/登录；登录后只有用户确认才导入该浏览器的游客会话。直接用 curl 调试会话接口时也需要保留 Cookie，例如 `curl -c /tmp/echo-nook-cookies -b /tmp/echo-nook-cookies -X POST http://localhost:8000/api/v1/identity/bootstrap`，后续请求加 `-b /tmp/echo-nook-cookies`。旧版无归属会话的本地恢复方式见 [数据库指南](docs/database.md)。
+
+身份接口包括 `POST /api/v1/identity/bootstrap`、`/register`、`/login`、`/import` 和 `/logout`。注册/登录接收 `{"username":"...","password":"..."}`；导入接口只在用户确认后调用，不接受客户端提供的归属 ID。游客和账号均可使用会话接口，但只能访问本身份的会话。账号密码找回、登录失败限流和正式部署联调仍属于阶段五后续工作。
+
 ## 试用流式接口
 
 先创建会话，并从响应中复制 `id`：
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/conversations \
+  -b /tmp/echo-nook-cookies \
   -H 'Content-Type: application/json' \
   -d '{"title":"命令行测试"}'
 ```
@@ -29,6 +34,7 @@ curl -X POST http://localhost:8000/api/v1/conversations \
 
 ```bash
 curl -N -X POST http://localhost:8000/api/v1/conversations/{conversation_id}/messages:stream \
+  -b /tmp/echo-nook-cookies \
   -H 'Content-Type: application/json' \
   -d '{"message":"你好"}'
 ```
@@ -52,7 +58,7 @@ DELETE /api/v1/conversations/{id}
 
 长对话在真实模型模式下按需更新会话摘要：保留最近 10 个问答回合原文，每次最多将更早的 3 个回合并入摘要；摘要和近期原文共同进入模型上下文，失败时回退到原文。摘要生成会额外调用一次模型，摘要只用于服务端上下文，不作为消息展示。首次使用前执行 `.venv/bin/alembic upgrade head`（测试库使用 `APP_ENV=test`）。
 
-S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。升级服务前需先执行 `alembic upgrade head` 到 `0004_model_calls`。
+S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。当前数据库版本为 `0005_identity`；升级服务前先执行 `alembic upgrade head`。
 
 前端使用 `/?conversation=<会话UUID>` 保存当前会话。直接打开链接时通过单会话查询验证 ID 并恢复消息；已删除或无效的链接会回退最近会话并提示。首次读取最新 100 条消息，滚到顶部或点击按钮后使用 `before_sequence` 每次加载更早 50 条。
 
