@@ -48,12 +48,7 @@ class OpenAICompatibleProvider:
                 *[{"role": item.role, "content": item.content} for item in messages],
             ],
         }
-        timeout = httpx.Timeout(
-            connect=self.settings.llm_connect_timeout_seconds,
-            read=self.settings.llm_read_timeout_seconds,
-            write=self.settings.llm_connect_timeout_seconds,
-            pool=self.settings.llm_connect_timeout_seconds,
-        )
+        timeout = httpx.Timeout(connect=10.0, read=120.0, write=20.0, pool=10.0)
         emitted_text = False
         # 上游响应必须处于异步上下文内，取消时才能及时关闭连接，
         # 避免模型请求在客户端离开后继续占用资源。

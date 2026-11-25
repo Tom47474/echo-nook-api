@@ -17,7 +17,7 @@ python3.14 -m venv .venv
 
 S5-1 后浏览器先调用 `POST /api/v1/identity/bootstrap` 建立游客身份，再携带服务端签发的 HttpOnly Cookie 访问会话接口。账号可通过用户名和密码注册/登录；登录后直接显示账号的独立窗口，退出后恢复该浏览器的游客窗口；两者消息不会合并。直接用 curl 调试会话接口时也需要保留 Cookie，例如 `curl -c /tmp/echo-nook-cookies -b /tmp/echo-nook-cookies -X POST http://localhost:8000/api/v1/identity/bootstrap`，后续请求加 `-b /tmp/echo-nook-cookies`。旧版无归属会话的本地恢复方式见 [数据库指南](docs/database.md)。
 
-身份接口包括 `POST /api/v1/identity/bootstrap`、`/register`、`/login` 和 `/logout`。注册/登录接收 `{"username":"...","password":"..."}`；旧游客导入接口已移除。游客和账号均可使用会话接口，但只能访问本身份的会话。S5-2 已增加可配置的登录失败保护；账号密码找回和正式部署联调仍属于后续工作。
+身份接口包括 `POST /api/v1/identity/bootstrap`、`/register`、`/login` 和 `/logout`。注册/登录接收 `{"username":"...","password":"..."}`；旧游客导入接口已移除。游客和账号均可使用会话接口，但只能访问本身份的会话。账号密码找回、登录失败限流和正式部署联调仍属于阶段五后续工作。
 
 ## 试用流式接口
 
@@ -57,13 +57,13 @@ DELETE /api/v1/conversations/{id}
 
 长对话在真实模型模式下按需更新会话摘要：保留最近 10 个问答回合原文，每次最多将更早的 3 个回合并入摘要；摘要和近期原文共同进入模型上下文，失败时回退到原文。摘要生成会额外调用一次模型，摘要只用于服务端上下文，不作为消息展示。首次使用前执行 `.venv/bin/alembic upgrade head`（测试库使用 `APP_ENV=test`）。
 
-S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。S5-2 使用调用时身份快照统计 UTC 当日主回复次数，并由 `0007_s5_limits` 增加额度查询索引；升级服务前先执行 `alembic upgrade head`。
+S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗时、结束原因和供应商返回的 token 用量。方舟流式请求显式启用 `stream_options.include_usage`；供应商未返回的字段保持 `NULL`，不使用 S4-1 估算值填充。表中不保存提示词、回复正文或 API Key。当前数据库版本为 `0006_single_window`；升级服务前先执行 `alembic upgrade head`。
 
 前端不再在 URL 保存会话 ID。刷新页面时按当前游客或账号身份读取唯一窗口及其消息。首次读取最新 100 条消息，滚到顶部或点击按钮后使用 `before_sequence` 每次加载更早 50 条。
 
 新接口首先发送 `message.started`，其中包含用户/助手消息 UUID 和 sequence；随后发送原有的 `message.delta`、`message.completed` 或 `message.failed`。处理新分片时，如果草稿累计新增 200 字符或距上次保存已达 1 秒，就执行一次检查点保存；最终事件前再完整保存。
 
-旧接口 `POST /api/v1/conversations/messages:stream` 暂时保留用于兼容和独立调试；当前前端已经不再调用它。旧接口不会持久化消息和用量归属，因此 `CONVERSATION_LIMIT_ENABLED=true` 时返回 410，不能用它绕过身份额度。
+旧接口 `POST /api/v1/conversations/messages:stream` 暂时保留用于兼容和独立调试；当前前端已经不再调用它。旧接口不会持久化消息，后续在完成兼容性评估后移除。
 
 ## 环境配置与火山方舟
 
@@ -85,22 +85,8 @@ S4-4 在 `model_calls` 表分别记录摘要与主回复的模型 ID、调用耗
 | `LLM_CONTEXT_WINDOW_TOKENS` | 当前模型的上下文窗口，默认保守使用 `32768`；切换模型时按供应商资料核对。 |
 | `LLM_MAX_OUTPUT_TOKENS` | 为回答（含可能的思考过程）预留并传给模型的 `max_tokens`，默认 `4096`。 |
 | `LLM_TOKEN_SAFETY_MARGIN` | 输入估算误差的安全余量，默认 `1024`。 |
-| `LLM_CONNECT_TIMEOUT_SECONDS` | 建立上游连接、写入和连接池等待超时，默认 10 秒。 |
-| `LLM_READ_TIMEOUT_SECONDS` | 相邻上游响应数据之间的读取超时，默认 120 秒。 |
-| `LLM_REPLY_TIMEOUT_SECONDS` | 一次主回复从开始到结束的总超时，默认 180 秒。 |
-| `LLM_SUMMARY_TIMEOUT_SECONDS` | 摘要模型调用总超时，默认 60 秒；超时回退到原文。 |
-| `CONVERSATION_LIMIT_ENABLED` | S5-2 总开关。`true` 启用额度、频率、并发和登录失败限制；`false` 不限额。模型超时不受此开关影响。 |
-| `CONVERSATION_GUEST_DAILY_LIMIT` | 单个游客 UTC 每日允许的主回复调用数，示例值 20。 |
-| `CONVERSATION_ACCOUNT_DAILY_LIMIT` | 单个登录账号 UTC 每日允许的主回复调用数，示例值 100。 |
-| `CONVERSATION_GUEST_MINUTE_LIMIT` | 单个游客每 60 秒允许开始的请求数，示例值 3。 |
-| `CONVERSATION_ACCOUNT_MINUTE_LIMIT` | 单个登录账号每 60 秒允许开始的请求数，示例值 10。 |
-| `CONVERSATION_GLOBAL_CONCURRENCY_LIMIT` | 当前服务进程同时生成的最大数量，示例值 8。 |
-| `LOGIN_FAILURE_LIMIT` | 同一来源地址与用户名组合在窗口内允许的失败次数，示例值 5。 |
-| `LOGIN_FAILURE_WINDOW_SECONDS` | 登录失败统计窗口，示例值 900 秒。 |
 
 S4-1 使用 `上下文窗口 - 最大输出 - 安全余量` 作为输入预算，先扣除系统提示词和本次问题，再从近到远按完整回合选择历史。发送前按 UTF-8 字节数及每条消息 16 token 的包装余量保守估算；它不是供应商真实分词结果，极端内容仍可能被上游拒绝。本次问题单独超预算会返回 422 `input_budget_exceeded`，不会创建消息。S4-2 按消息顺序和终态组装问答：失败或取消的部分正文附内部中断标记，空回复只保留用户问题；同一问题的“再次提问”仍是独立回合。实际用量读取和记录属于 S4-4。
-
-S5-2 的日额度按 UTC 自然日统计 `model_calls.purpose='reply'`，失败或取消但已实际开始的主回复也可能占用一次额度；摘要调用不占用户的发送次数。清空消息、登录和退出都不会重置调用时身份的历史额度。分钟频率、同身份单生成、全局并发和登录失败计数当前保存在进程内，因此首个生产版本必须使用单个 API 工作进程；多进程或多实例部署前需改为 Redis 等共享协调器。429 响应带结构化错误码，适用时包含 `Retry-After`。
 
 使用 `openai_compatible` 时，适配器调用方舟的 `/chat/completions` 流式接口，只转发回答正文，不将模型的思考内容展示给前端。代码默认值为 `demo`，未显式设置 `LLM_PROVIDER` 时会使用演示回复；即使配置了 API Key 和模型 ID，只要 Provider 仍是 `demo`，也不会调用真实模型。不要提交 `.env` 或在日志中打印密钥。
 

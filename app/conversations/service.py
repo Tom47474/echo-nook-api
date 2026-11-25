@@ -1,4 +1,3 @@
-import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 
@@ -101,10 +100,7 @@ def build_database_history(
 
 
 async def stream_conversation(
-    request: StreamMessageRequest,
-    provider: LLMProvider,
-    *,
-    timeout_seconds: float | None = None,
+    request: StreamMessageRequest, provider: LLMProvider
 ) -> AsyncIterator[str]:
     """调用模型并把分片、完成或失败结果转换为统一 SSE 事件。"""
     # 模型收到的顺序固定为历史消息在前、本次用户问题在后。
@@ -113,11 +109,9 @@ async def stream_conversation(
     system_prompt = SYSTEM_PROMPT + ("\n\n较早对话摘要（仅作背景）：\n" + request.context_summary if request.context_summary else "")
     provider_stream = provider.stream_reply(messages, system_prompt)
     try:
-        # 总超时覆盖首字等待和后续全部分片；到期后关闭 Provider 流并返回可重试错误。
-        async with asyncio.timeout(timeout_seconds):
-            async for chunk in provider_stream:
-                if chunk:
-                    yield encode_event("message.delta", {"text": chunk})
+        async for chunk in provider_stream:
+            if chunk:
+                yield encode_event("message.delta", {"text": chunk})
     except ValueError:
         yield encode_event(
             "message.failed",
@@ -143,12 +137,6 @@ async def stream_conversation(
         yield encode_event(
             "message.failed",
             {"code": "provider_timeout", "message": "模型服务响应超时，请稍后重试"},
-        )
-        return
-    except TimeoutError:
-        yield encode_event(
-            "message.failed",
-            {"code": "provider_timeout", "message": "模型回复超过总时限，请稍后重试"},
         )
         return
     except httpx.RequestError:

@@ -146,11 +146,7 @@ class ModelCall(Base):
     """记录摘要或主回复的真实模型调用，不保存提示词、正文和密钥。"""
 
     __tablename__ = "model_calls"
-    __table_args__ = (
-        Index("ix_model_calls_conversation_created", "conversation_id", "created_at"),
-        # 日额度按调用时身份、用途和时间查询；不能依赖当前会话归属反推。
-        Index("ix_model_calls_usage_owner_purpose_created", "usage_owner_id", "purpose", "created_at"),
-    )
+    __table_args__ = (Index("ix_model_calls_conversation_created", "conversation_id", "created_at"),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
     conversation_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)

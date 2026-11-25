@@ -12,7 +12,7 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | `principals`、`identity_sessions`、`conversations`、`messages`、`model_calls`；当前迁移版本为 `0007_s5_limits` |
+| 业务表 | `principals`、`identity_sessions`、`conversations`、`messages`、`model_calls`；当前迁移版本为 `0006_single_window` |
 | 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
@@ -128,13 +128,13 @@ erDiagram
 | `usage_owner_id` | `uuid`，可空 | 调用发生时的身份 ID 快照，故意不设外键，避免身份变化影响历史归因。 |
 | `usage_owner_kind` | `varchar(16)`，可空 | 调用发生时的 `guest`/`account` 快照。 |
 
-`ix_model_calls_conversation_created` 支持按窗口和时间查询。`0007_s5_limits` 新增 `ix_model_calls_usage_owner_purpose_created`，用于按调用时身份、用途和时间统计 UTC 当日主回复额度，避免每次发送前全表扫描。摘要调用和主回复调用分别占一行。该表不保存提示词、回复正文或 API Key。页面执行“清空对话”时保留调用记录，用于成本核算、额度和排错；只有删除整个 `conversations` 容器时才会级联删除。
+`ix_model_calls_conversation_created` 支持按窗口和时间查询。摘要调用和主回复调用分别占一行。该表不保存提示词、回复正文或 API Key。页面执行“清空对话”时保留调用记录，用于成本核算和排错；只有删除整个 `conversations` 容器时才会级联删除。
 
 ## `alembic_version`：迁移版本
 
 | 字段 | 类型与空值 | 用途 |
 | --- | --- | --- |
-| `version_num` | `varchar(32)`，主键，非空 | 当前 schema 版本；本项目当前为 `0007_s5_limits`。 |
+| `version_num` | `varchar(32)`，主键，非空 | 当前 schema 版本；本项目当前为 `0006_single_window`。 |
 
 该表由 Alembic 管理。不要手工修改版本号来伪造迁移完成状态，应执行 `alembic upgrade head`。
 
@@ -318,7 +318,7 @@ APP_ENV=test .venv/bin/alembic current
 
 ### 应用启动时数据库连接失败
 
-先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0007_s5_limits`。其他部署环境需各自执行迁移。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0006_single_window`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
 
 ### 开发库旧会话认领
 

@@ -1,6 +1,5 @@
 """长对话摘要更新：只压缩已终结的旧回合，失败时保留近期原文。"""
 
-import asyncio
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -42,7 +41,6 @@ async def refresh_summary(
     *,
     usage_owner_id: UUID | None = None,
     usage_owner_kind: str | None = None,
-    timeout_seconds: float | None = None,
 ) -> tuple[str, int]:
     """按需生成摘要；模型或数据库更新失败时返回已保存版本，不阻断主回复。"""
     async with manager.session() as session:
@@ -64,12 +62,10 @@ async def refresh_summary(
     generation_failed = False
     stream = provider.stream_reply([ChatMessage(role="user", content=prompt)], SUMMARY_PROMPT)
     try:
-        # 摘要超时只触发回退，不得阻断本次主回复。
-        async with asyncio.timeout(timeout_seconds):
-            async for chunk in stream:
-                chunks.append(chunk)
-                if sum(map(len, chunks)) > SUMMARY_MAX_CHARS:
-                    break
+        async for chunk in stream:
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > SUMMARY_MAX_CHARS:
+                break
     except Exception:
         generation_failed = True
     finally:

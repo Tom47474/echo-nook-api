@@ -71,7 +71,6 @@ async def stream_persisted_conversation(
     conversation_id: UUID | None = None,
     usage_owner_id: UUID | None = None,
     usage_owner_kind: str | None = None,
-    timeout_seconds: float | None = None,
 ) -> AsyncIterator[str]:
     """转发模型 SSE，同时保存草稿及 completed/failed/cancelled 终态。"""
     writer = AssistantMessageWriter(manager, assistant_message_id)
@@ -80,7 +79,7 @@ async def stream_persisted_conversation(
     last_saved_at = monotonic()
     terminal_saved = False
     call_status = "cancelled"
-    source = stream_conversation(request, provider, timeout_seconds=timeout_seconds)
+    source = stream_conversation(request, provider)
 
     try:
         # started 事件让后续前端能把本地临时消息与数据库 UUID、sequence 对齐。

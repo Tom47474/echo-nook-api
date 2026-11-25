@@ -14,7 +14,6 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供身份管理、单�
 | `app/core/identity.py` | Cookie 凭证签发与摘要、密码哈希、Origin 校验及请求身份解析。 |
 | `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置；`APP_ENV` 仅接受 development、test、production。 |
 | `app/core/dependencies.py` | 从当前 FastAPI 实例读取实际配置，避免测试应用和默认应用混用设置。 |
-| `app/core/limits.py` | S5-2 日额度查询、分钟频率、身份/全局并发租约和登录失败窗口。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
 | `app/conversations/models.py` | 身份、凭证、窗口、消息和模型调用 ORM 模型及数据库约束。 |
 | `app/conversations/persistence.py` | 包装模型 SSE，节流保存助手草稿、写入最终状态并恢复异常中断消息。 |
@@ -48,7 +47,6 @@ HTTP 路由 → 对话服务 → LLMProvider 接口 → 演示/真实模型适�
               请求 Schema
 
 FastAPI lifespan → DatabaseManager → async Engine → PostgreSQL
-                → ConversationLimitManager ──────────┤
 HTTP 路由       → 请求级 AsyncSession ────────────────┘
 ```
 
@@ -88,8 +86,6 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。历史查询保留终态助手的空正文，业务层才能判断最后一次尝试是否为空；失败或取消的非空正文附加内部中断标记，空回复只保留用户问题。多个助手终态属于同一用户消息时以最后一次为准；当前“再次提问”创建新的用户/助手回合，不把相同问题自动合并。会话不存在时返回结构化 404。
 
-S5-2 在创建上述两条消息之前取得生成租约：主开关开启时先查 `model_calls` 的 UTC 当日主回复数，再校验身份的 60 秒滑动窗口、同身份唯一在途生成和进程全局并发。任一校验拒绝都返回 429，数据库不会留下用户消息或助手占位。租约由包装 SSE 在完成、失败、主动停止或连接关闭时统一释放。主开关关闭会跳过额度、频率、并发及登录失败限制，但模型连接、读取、摘要和主回复总超时始终生效。
-
 S4-3 由 `0003_conversation_summary` 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。真实模型模式下，超过最近 10 个回合的旧记录按每次最多 3 回合滚动压缩；摘要覆盖边界之前的原文不再重复送入主模型。摘要放在系统背景信息中，近期消息仍按 S4-1 预算和 S4-2 回合规则选择。摘要生成或保存失败时使用原文继续回答；并发更新以旧覆盖边界和 `content_epoch` 为条件，避免旧请求覆盖新摘要或在清空后回写。演示模型不生成摘要。当前数据库应统一升级到 head `0006_single_window`。
 
 S4-4 由 `0004_model_calls` 增加 `model_calls` 表，按 `purpose=summary|reply` 区分两次真实模型调用。方舟流式请求设置 `stream_options.include_usage=true`，适配器解析可能出现在 `choices=[]` 尾块中的 `usage`，同时读取模型名和 `finish_reason`；模型流关闭时记录耗时。结束状态按服务端实际结果保存为 `completed/failed/cancelled`。供应商未返回的 token 字段及结束原因保持 `NULL`，不使用估算值或推断值替代；演示 Provider 不生成真实调用记录。调用记录不包含密钥和对话正文，写入失败不会修改对话消息的终态。当前 schema head 为 `0006_single_window`。
@@ -121,7 +117,7 @@ S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cook
 
 客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。新接口保存用户问题、助手草稿和最终状态；刷新页面或切换身份后按对应窗口恢复。
 
-上面的无会话 ID 接口是旧版兼容接口，仍由调用方提供 `history`，也不会写入数据库。当前前端已经切换到带会话 ID 的接口；启用 S5-2 限额时该接口返回 410，因为它没有可靠的持久化调用归属，不能允许其绕过日额度。
+上面的无会话 ID 接口是旧版兼容接口，仍由调用方提供 `history`，也不会写入数据库。当前前端已经切换到带会话 ID 的接口；旧接口只为兼容和独立调试暂时保留，后续评估后移除。
 
 ## 环境隔离与调试
 

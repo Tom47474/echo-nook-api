@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import router
 from app.conversations.persistence import recover_interrupted_generations
 from app.core.config import Settings, get_settings
-from app.core.limits import ConversationLimitManager
 from app.db.session import DatabaseManager
 
 
@@ -21,8 +20,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         require_test_database=settings.app_env == "test",
     )
     app.state.database_manager = manager
-    # 限额器和数据库管理器共享应用生命周期；所有请求看到同一份在途状态。
-    app.state.conversation_limit_manager = ConversationLimitManager(settings, manager)
     try:
         await manager.ping()
         # 当前部署为单进程模型；启动时修复上次异常退出遗留的生成中消息。
