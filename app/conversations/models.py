@@ -159,7 +159,7 @@ class ModelCall(Base):
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # 调用时快照不随游客会话导入而改写；历史 NULL 表示上线身份前无法可靠归因。
+    # 调用时快照不随登录、退出或清空改写；历史 NULL 表示身份功能前无法可靠归因。
     usage_owner_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     usage_owner_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

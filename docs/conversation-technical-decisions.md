@@ -56,7 +56,7 @@ Provider 包装层的调用次序是 `Hook → DebugReplyProvider → HttpReplyP
 
 ### 难点：生成失败发生在收到部分正文之后
 
-只显示一个“失败”会丢掉已经阅读的内容。前端 [use-conversation.ts](../../echo-nook-web/src/modules/conversation/hooks/use-conversation.ts) 在 `delta` 时累加正文；失败时保留正文并置 `failed`，将结构化错误交给 [message-item.tsx](../../echo-nook-web/src/modules/conversation/components/message-item.tsx) 展示。服务端 [service.py](../app/conversations/service.py) 将配置缺失、鉴权失败、模型不可用、限流、超时、不可达和一般异常编码成 `message.failed`，不在错误文案中回显上游密钥或响应正文。前端 [conversation-error.ts](../../echo-nook-web/src/modules/conversation/model/conversation-error.ts) 将配置、鉴权和模型不可用标为不可直接重试，其余可再次尝试。
+只显示一个“失败”会丢掉已经阅读的内容。前端 [use-current-conversation.ts](../../echo-nook-web/src/modules/conversation/hooks/use-current-conversation.ts) 在 `delta` 时累加正文；失败时保留正文并置 `failed`，将结构化错误交给 [message-item.tsx](../../echo-nook-web/src/modules/conversation/components/message-item.tsx) 展示。服务端 [service.py](../app/conversations/service.py) 将配置缺失、鉴权失败、模型不可用、限流、超时、不可达和一般异常编码成 `message.failed`，不在错误文案中回显上游密钥或响应正文。前端 [conversation-error.ts](../../echo-nook-web/src/modules/conversation/model/conversation-error.ts) 将配置、鉴权和模型不可用标为不可直接重试，其余可再次尝试。
 
 以模型先输出“第一段”后超时为例：`HttpReplyProvider` 解析第一个 `message.delta`，Hook 找到当前助手消息并把文本追加到 `content`；服务端随后产生 `message.failed`，Provider 将 `code` 和安全的提示文案包装为 `ConversationRequestError`；Hook 的 `catch` 只改变该消息的 `status` 和 `error`，不清空 `content`。消息组件仍显示“第一段”，并在下方显示错误说明。服务端 S2-5 后也会把这段正文和 `failed/error_code` 落库，所以重新加载仍可看到残缺回答。若失败发生在第一个分片之前，正文为空，组件显示“未生成可展示的回复”。
 
@@ -126,15 +126,17 @@ S1-2 最初在内存里清空旧助手气泡并原地重新生成，不增加用
 
 阶段二的服务端测试覆盖迁移、唯一约束、级联删除、分页、并发顺序、历史来源、草稿检查点、完成、失败、停止及启动恢复。S2-5 完成时 28 项测试通过。身份鉴权、token 预算和多实例租约尚未实现。
 
-## 阶段三：前端历史会话体验
+## 阶段三：前端历史会话体验（历史实现）
+
+本节记录 S3 当时的多会话实现和技术取舍。`conversation-list.tsx`、`use-conversation.ts`、`conversation-url.ts` 已在单窗口改造中删除；当前入口是 `use-current-conversation.ts`，现行产品行为以本文后面的“S5-1 当前方案”为准。
 
 ### S3-1：服务端会话与浏览器状态同步（已完成）
 
-前端 [conversation-api.ts](../../echo-nook-web/src/modules/conversation/services/conversation-api.ts) 集中调用会话 REST API，把 `created_at`、`conversation_id`、`error_code` 等 DTO 映射为页面模型，并根据相邻消息还原 `turnId`。页面初始化读取会话列表，自动选择最近会话、查询最近 100 条；[conversation-list.tsx](../../echo-nook-web/src/modules/conversation/components/conversation-list.tsx) 提供新建、切换、删除，删除前确认。没有活动会话时，首次发送先创建会话。由于服务端列表按更新时间排序，生成结束会刷新列表，让活动会话回到顶部。
+前端 [conversation-api.ts](../../echo-nook-web/src/modules/conversation/services/conversation-api.ts) 集中调用会话 REST API，把 `created_at`、`conversation_id`、`error_code` 等 DTO 映射为页面模型，并根据相邻消息还原 `turnId`。当时页面初始化读取会话列表，自动选择最近会话、查询最近 100 条；已删除的 `conversation-list.tsx` 曾提供新建、切换、删除，删除前确认。没有活动会话时，首次发送先创建会话。由于服务端列表按更新时间排序，生成结束会刷新列表，让活动会话回到顶部。
 
 浏览器模型和数据库 JSON 有不同命名：服务端返回 `conversation_id/created_at/error_code`，组件使用 `conversationId/createdAt/error`。转换集中在 `conversation-api.ts`，因此消息气泡和列表不需要处理 HTTP 格式。恢复消息时，遇到用户消息把其正式 ID 设为当前 `turnId`，后续助手消息关联同一回合；失败消息依据 `error_code` 恢复提示。初始化的顺序是获取列表 → 选择服务端排序第一条 → 请求该会话最新 100 条 → 显示。列表为空时不预先创建空会话，首次发送才调用创建接口。
 
-发送时 [use-conversation.ts](../../echo-nook-web/src/modules/conversation/hooks/use-conversation.ts) 先放入临时用户和助手消息，避免等待网络时界面空白。前端 [HttpReplyProvider](../../echo-nook-web/src/modules/conversation/services/http-reply-provider.ts) 向带会话 ID 的接口仅发送本次 `message`，逐个解析 SSE：网络分块可能截断事件，因此缓冲到空行才解帧。收到 `message.started` 后以正式 UUID 和 `sequence` 替换临时 ID；`delta` 追加正文，`completed` 标记结束，`failed` 转成结构化异常并保留已有正文。
+发送时已删除的 `use-conversation.ts` 会先放入临时用户和助手消息，避免等待网络时界面空白；这段乐观更新逻辑现由 [use-current-conversation.ts](../../echo-nook-web/src/modules/conversation/hooks/use-current-conversation.ts) 延续。前端 [HttpReplyProvider](../../echo-nook-web/src/modules/conversation/services/http-reply-provider.ts) 向带窗口 ID 的接口仅发送本次 `message`，逐个解析 SSE：网络分块可能截断事件，因此缓冲到空行才解帧。收到 `message.started` 后以正式 UUID 和 `sequence` 替换临时 ID；`delta` 追加正文，`completed` 标记结束，`failed` 转成结构化异常并保留已有正文。
 
 #### 乐观消息怎样与数据库正式消息对齐
 
@@ -160,7 +162,7 @@ S1-2 最初在内存里清空旧助手气泡并原地重新生成，不增加用
 
 #### 难点一：刷新后应该恢复链接指定的会话，而非最近会话
 
-S3-1 只在 React 内存里保存活动 ID。用户先查看会话 A，再切到会话 B 并刷新，内存重置后又从按 `updated_at` 排序的列表选择第一项；如果另一会话近期更活跃，页面就不是刷新前的 B。S3-2 把活动 ID 放进 `/?conversation=<UUID>`。前端 [conversation-url.ts](../../echo-nook-web/src/modules/conversation/services/conversation-url.ts) 使用 `URL` 和 `URLSearchParams` 读写参数，保留页面原有其他查询参数及 hash。新建或点击列表切换时使用 `history.pushState`，给浏览器后退保留导航记录；首次没有参数而选择最近会话、或删除当前会话后选择替代会话时使用 `replaceState`，避免后退再次打开已删除地址。这里仅变更同一页面的查询参数，不触发整页重载。
+S3-1 只在 React 内存里保存活动 ID。用户先查看会话 A，再切到会话 B 并刷新，内存重置后又从按 `updated_at` 排序的列表选择第一项；如果另一会话近期更活跃，页面就不是刷新前的 B。S3-2 曾把活动 ID 放进 `/?conversation=<UUID>`。已删除的 `conversation-url.ts` 使用 `URL` 和 `URLSearchParams` 读写参数，保留页面原有其他查询参数及 hash。新建或点击列表切换时使用 `history.pushState`，给浏览器后退保留导航记录；首次没有参数而选择最近会话、或删除当前会话后选择替代会话时使用 `replaceState`，避免后退再次打开已删除地址。这里仅变更同一页面的查询参数，不触发整页重载。
 
 一次直达请求的顺序是：浏览器打开 `/?conversation=B` → Hook 读取 URL → 加载会话列表 → 用服务端单会话接口验证 B 并取得标题 → 设置活动 ID 为 B → 请求 B 的最新 100 条消息 → 页面显示 B。此处增加 [GET 单会话接口](../app/api/routes/conversations.py)：如果 B 很久没使用，可能不在当前只读取的列表前 100 项；仅搜索列表会把存在的 B 错判为已删除。Repository 按主键读取，路由返回与创建/列表相同的会话 DTO；若列表里没有 B，Hook 将查询到的 B 加入可见列表，保证当前会话在导航栏中有对应项。消息正文仍从数据库读取，不从浏览器存储复制。
 
@@ -178,7 +180,7 @@ S3-1 只在 React 内存里保存活动 ID。用户先查看会话 A，再切到
 
 #### 验证和边界
 
-前端测试验证直达列表第一页之外的会话、失效链接回退、保留其他 URL 参数与 hash、浏览器后退、迟到 URL 查询、网络错误，以及 404 与 503 的不同处理；服务端测试验证按 ID 查询成功与结构化 404。完成 S3-2 时前端 18 项测试、lint、production build 和服务端 29 项测试通过。当前 URL 恢复仅加载最新 100 条消息，超过范围的历史由 S3-3 补齐。当前服务端尚无身份归属校验，知道会话 ID 仍不能被视为访问授权，开放给其他用户前必须完成 S5-1。
+前端测试当时验证了直达列表第一页之外的会话、失效链接回退、保留其他 URL 参数与 hash、浏览器后退、迟到 URL 查询、网络错误，以及 404 与 503 的不同处理；服务端测试验证按 ID 查询成功与结构化 404。完成 S3-2 时前端 18 项测试、lint、production build 和服务端 29 项测试通过。当时尚无身份归属校验；S5-1 后接口已按 `owner_id` 授权，单窗口改造又移除了 URL 会话导航。
 
 ### S3-3：按游标读取更早消息并保持阅读位置（已完成）
 
@@ -186,7 +188,7 @@ S3-1 只在 React 内存里保存活动 ID。用户先查看会话 A，再切到
 
 假设会话已有 `sequence=0…120`，页面先显示最近 100 条。用户向上翻页时，助手可能还在生成、另一个请求也可能写入新回合；若按 `offset=100` 读取“第二页”，新记录会使排序整体位移，旧记录可能重复或漏掉。服务端 S2-3 已提供稳定的 `before_sequence` 游标：首次请求 `GET /messages?limit=100`，返回正序 `items`、`has_more`、`next_before_sequence`；下一次请求 `GET /messages?limit=50&before_sequence=<游标>`，数据库严格取 `sequence < 游标` 的记录。即使末尾新增更大的序号，较早页的边界不变。
 
-前端 [conversation-api.ts](../../echo-nook-web/src/modules/conversation/services/conversation-api.ts) 现在完整保留分页元数据，不再只返回 `Message[]`；[use-conversation.ts](../../echo-nook-web/src/modules/conversation/hooks/use-conversation.ts) 把下一游标存在 `cursorRef`，并用 `hasMore` 决定是否显示入口。例子：当前页面最早是 #71，服务端指示 `next_before_sequence=71`；再请求 `<71`，返回 #21…#70，不会重复 #71。只有服务端说有更多数据且游标非空时才发下一页。空页或没有更多记录时停止请求。
+前端 [conversation-api.ts](../../echo-nook-web/src/modules/conversation/services/conversation-api.ts) 完整保留分页元数据，不再只返回 `Message[]`；当前 [use-current-conversation.ts](../../echo-nook-web/src/modules/conversation/hooks/use-current-conversation.ts) 把下一游标存在 `cursorRef`，并用 `hasMore` 决定是否显示入口。例子：当前页面最早是 #71，服务端指示 `next_before_sequence=71`；再请求 `<71`，返回 #21…#70，不会重复 #71。只有服务端说有更多数据且游标非空时才发下一页。空页或没有更多记录时停止请求。
 
 #### 难点二：拼接消息不只是数组相加
 
@@ -318,39 +320,13 @@ S4-1 按预算选最近的完整回合；对长会话而言，较早的用户偏
 
 测试覆盖 `choices=[]` 用量尾块、`finish_reason` 和实际模型名、缺失用量保留空值、摘要与主回复两条记录，以及失败和取消调用的已知字段与未知字段。服务端 42 项测试通过；本地开发库与测试库均升级到 `0004_model_calls`，两个环境的 `alembic check` 均无差异。可用 [数据库指南](database.md) 中的只读 SQL 在 DBeaver 查看最近调用。当前不提供面向前端的用量查询接口；阶段五的身份归属完成前，不应开放按会话查看内部调用记录的公共接口。
 
-## S5-1：游客与账号身份、会话归属及导入（已完成）
+## S5-1 初版身份方案（历史记录，已被单窗口方案替代）
 
-### 难点一：会话 UUID 不能充当访问凭证
+`0005_identity` 首次加入游客、账号、Cookie 会话、会话归属校验和调用时用量归属。当时短暂实现过“用户确认后把游客会话导入账号”，并为多会话页面返回 `importable_count`。随后产品确定游客与账号必须保留各自独立的消息，因此 `/identity/import`、`importable_count` 和前端导入提示已经删除。实施记录仍保留在 Git 历史和路线图中，不能再作为当前接口说明。
 
-旧接口按 URL 中的 UUID 查询、发送和删除会话，没有验证请求者。知道或取得链接的人就可能操作别人的消息。[0005_identity.py](../alembic/versions/0005_identity.py) 增加身份与会话表，[身份模块](../app/core/identity.py) 负责凭证，[ConversationRepository](../app/conversations/repository.py) 在 SQL 中落实归属，[identity-api.ts](../../echo-nook-web/src/modules/conversation/services/identity-api.ts) 保证前端请求携带 Cookie。
+当前仍沿用的安全基础包括：浏览器只持有高熵随机 Cookie，数据库只保存 SHA-256 摘要；账号密码保存独立盐的 scrypt 哈希；Cookie 为 `HttpOnly`、`SameSite=Lax`，HTTPS 或正式环境启用 `Secure`；写请求校验 Origin；所有窗口和消息 SQL 都按服务端解析出的 `owner_id` 过滤，客户端不能提交可信身份 ID。完整现行流程见下一节。
 
-### 一次请求如何找到会话所有者
-
-前端首次挂载对话组件时，先调用 `POST /api/v1/identity/bootstrap`。服务端优先验证活跃 Cookie：用 Cookie 原值计算 SHA-256，在 `identity_sessions` 中找到未过期的摘要，再关联 `principals`。如果活跃 Cookie 失效但游客 Cookie 仍有效，恢复该游客；两者都无效时，新建游客身份和会话凭证。两个 Cookie 均为 `HttpOnly`、`SameSite=Lax`，生产环境或 HTTPS 请求还设置 `Secure`；页面脚本只读取接口返回的 `id/kind/username/importable_count`，不能读取凭证本身。前端 `ensureIdentity()` 缓存初始化 Promise，避免列表加载和流式请求同时初始化出两个游客。身份准备好后才挂载对话 Hook；其后 REST、SSE 都使用 `credentials: include`，服务端统一从 Cookie 解析身份。HTTP 客户端和浏览器因而走同一套鉴权逻辑。
-
-登录或注册时，前端发送用户名、密码，服务端建立账号会话并替换活跃 Cookie，原游客 Cookie 暂留。前端以新身份重新挂载会话 Hook，清空旧身份的内存消息并重新请求账号会话列表；退出也执行相同的重新挂载。浏览器不能在请求体里指定 `owner_id`。如果活跃凭证失效，受保护接口返回 401，前端下次初始化可建立新游客，但旧游客会话不会因此转给新游客。
-
-### 为什么只在路由验证身份还不够
-
-路由的 `require_identity` 先验证 Cookie 与 Origin，再把已解析的 `Principal.id` 交给 Repository。Repository 在列表、单条读取、存在性检查、消息分页、删除和发送事务的 SQL 中都带上 `owner_id` 条件。单条会话不属于当前身份时与不存在一样返回 404，不透露其是否存在。消息分页即使已在路由做存在性检查，实际 `SELECT` 仍连接 `conversations` 再核对归属；这样导入恰好发生在两次查询之间时，也不会继续读到已转移的消息。删除和发送均在行锁下复核归属，使并发导入等待当前事务结束。旧兼容流接口虽不写会话，也要求有效身份，防止它变成匿名模型调用入口。
-
-数据库的 `conversations.owner_id` 原本可空以兼容旧数据，`0005` 给它加了指向 `principals` 的外键。迁移不猜测旧数据属于谁；旧 `NULL` 会话无法经普通接口访问。本机开发可先确认身份 ID，再使用 `python -m app.scripts.claim_legacy --owner <UUID>` 预览，用 `--apply` 明确认领；脚本仅允许 `APP_ENV=development`。这一步只解决可信的本地旧数据，不应在测试或正式库批量认领。
-
-### 难点二：登录不能静默吞并本机游客会话
-
-账号当前使用用户名和密码，服务端以独立盐和 scrypt 哈希保存密码；注册时数据库唯一约束处理并发重名。登录成功会签发新的账号会话 Cookie，同时保留原游客 Cookie。前端 [IdentityControls](../../echo-nook-web/src/modules/conversation/components/identity-controls.tsx) 在服务端报告有游客会话时显示确认导入与暂不导入。只有用户点击导入，`POST /api/v1/identity/import` 才同时验证账号和原游客凭证、锁定游客身份、在一个事务中把该游客会话的 `owner_id` 改为账号 ID，并删除原游客会话凭证；失败则事务回滚。消息、摘要和模型调用记录继续关联原 UUID，不逐条复制。导入后重新读取账号会话列表；不导入时游客数据仍归原游客。退出账号后恢复有效游客凭证或建立新游客身份。
-
-### 难点三：会话现任所有者不等于历史用量所有者
-
-游客时期产生 500 token、登录导入后又产生 300 token 时，导入只改变会话访问归属，不能把原 500 token 追扣账号。`model_calls` 新增 `usage_owner_id` 和 `usage_owner_kind`；路由在提交或回滚前从身份 ORM 对象复制这两个标量，摘要和主回复调用都携带该快照，写入调用记录后不随导入更改。身份尚未建立前的旧调用快照为 `NULL`，无法可靠倒推。token 用量仅供服务端成本与后续限额，不在界面展示。
-
-### 验证和边界
-
-服务端 47 项测试通过，覆盖跨游客及跨账号读取、发送和删除的拒绝，错误密码、来源校验、浏览器跨端口 Cookie 请求、显式导入、重复导入以及导入后历史用量归属不变；前端 27 项测试、lint 和构建通过。开发和测试数据库已升级到 `0005_identity`，Alembic 无待生成差异。旧版 `owner_id=NULL` 的会话不自动分给第一个访问者；开发环境提供显式认领命令，见 [数据库指南](database.md)。当前账号没有邮箱验证、密码找回或登录频率控制；游客与账号额度及并发限制属于 S5-2，正式开放前还需 S5-4 的完整联调和同站 HTTPS Cookie 验证。
-
-## S5-1 补充：单窗口与游客/账号独立消息（2026-11-25）
-
-本节覆盖上文 S3 多会话界面和 S5-1 游客导入的旧行为。旧章节保留阶段演进记录；当前产品以本节为准。
+## S5-1 当前方案：单窗口与游客/账号独立消息（2026-11-25）
 
 ### 难点一：只保留一个窗口，同时不能丢弃旧消息
 

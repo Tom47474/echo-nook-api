@@ -1,6 +1,6 @@
 # 服务端架构与目录说明
 
-EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端已通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，并由 Alembic 管理版本；会话管理和新流式接口已读写数据库，当前前端已经接入带会话 ID 的持久化接口。
+EchoNook API 是独立的 FastAPI 服务。当前版本提供身份管理、单窗口消息持久化、健康检查和文字流式回复。本机通过仓库根目录的 `.env` 选择火山方舟模型；代码也保留演示模型，供未配置真实模型的环境使用。服务端通过 SQLAlchemy 和 asyncpg 接入 PostgreSQL，由 Alembic 管理版本；前端先取得当前身份的唯一窗口，再以内部窗口 ID 查询消息和发起持久化 SSE。
 
 ## 目录与文件职责
 
@@ -9,13 +9,17 @@ EchoNook API 是独立的 FastAPI 服务。当前版本提供健康检查和文�
 | `app/main.py` | 创建 FastAPI 应用、配置 CORS、注册总路由，并在 lifespan 中检查数据库和释放连接池。 |
 | `app/api/router.py` | 汇总各业务路由。 |
 | `app/api/routes/health.py` | `/health` 健康检查。 |
-| `app/api/routes/conversations.py` | 对话 HTTP 接口，负责校验后的请求与流式响应封装。 |
+| `app/api/routes/identity.py` | 游客初始化、账号注册/登录/退出；登录与退出只切换身份，不迁移消息。 |
+| `app/api/routes/conversations.py` | 当前窗口、清空、消息分页和持久化流式接口；旧多会话接口标记为 deprecated。 |
+| `app/core/identity.py` | Cookie 凭证签发与摘要、密码哈希、Origin 校验及请求身份解析。 |
 | `app/core/config.py` | 定义配置项和默认值，从仓库根目录的 `.env` 加载本机配置；`APP_ENV` 仅接受 development、test、production。 |
 | `app/core/dependencies.py` | 从当前 FastAPI 实例读取实际配置，避免测试应用和默认应用混用设置。 |
 | `app/conversations/schemas.py` | 对话请求和历史消息的数据格式与长度限制。 |
-| `app/conversations/models.py` | 会话和消息 ORM 模型、角色/状态定义、顺序与数据约束。 |
+| `app/conversations/models.py` | 身份、凭证、窗口、消息和模型调用 ORM 模型及数据库约束。 |
 | `app/conversations/persistence.py` | 包装模型 SSE，节流保存助手草稿、写入最终状态并恢复异常中断消息。 |
-| `app/conversations/repository.py` | 会话创建、稳定分页、消息游标查询和删除所需的 SQLAlchemy 查询。 |
+| `app/conversations/repository.py` | 唯一当前窗口、清空、归属校验、消息游标和回合创建的 SQLAlchemy 查询。 |
+| `app/conversations/summary.py` | 长对话滚动摘要、并发边界和清空版本校验。 |
+| `app/conversations/call_records.py` | 保存真实模型调用状态、耗时和供应商用量。 |
 | `app/conversations/service.py` | 组装消息、设置角色提示词、把文本片段编码为 SSE 事件。 |
 | `app/db/base.py` | SQLAlchemy 声明式模型和 Alembic 共享的元数据基类。 |
 | `app/db/session.py` | 校验连接地址、创建异步 Engine/Session、连接检查及连接池释放。 |
@@ -46,13 +50,17 @@ FastAPI lifespan → DatabaseManager → async Engine → PostgreSQL
 HTTP 路由       → 请求级 AsyncSession ────────────────┘
 ```
 
-路由不处理模型供应商返回格式。具体适配器不处理 HTTP 响应。对话服务只使用 `LLMProvider` 接口。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；变更接口显式提交，异常由 Session 上下文回滚。会话和消息模型位于 `app/conversations/models.py`，查询集中在 `repository.py`；新流式接口先提交用户消息，再加载数据库历史并调用模型。当前数据库操作方式见 [PostgreSQL 本地开发与测试指南](database.md)。
+路由不解析模型供应商返回格式，具体模型适配器也不拼装 FastAPI 响应。对话服务只依赖 `LLMProvider`。`DatabaseManager` 归 FastAPI 应用生命周期所有，请求通过依赖获取独立 Session；变更接口显式提交，异常由 Session 上下文回滚。全部 ORM 模型位于 `app/conversations/models.py`，查询集中在 `repository.py`；持久化流式接口先提交用户消息和助手占位消息，再加载数据库历史并调用模型。完整字段、外键、索引和删除规则见 [PostgreSQL 本地开发与测试指南](database.md)。
 
 ## 数据模型
+
+`principals` 统一表示游客和账号；游客没有用户名和密码哈希，账号保存小写用户名与 scrypt 哈希。`identity_sessions` 只保存随机 Cookie 的 SHA-256 摘要、身份 ID 和过期时间，身份删除时级联清除凭证。
 
 `conversations` 使用 UUIDv7 主键，包含标题、创建/更新时间、可空的 `owner_id`、`is_current` 和 `content_epoch`。`owner_id` 外键关联游客或账号身份并用于授权；可空仅为无可信归属的旧数据保留。`is_current=true` 的条件唯一索引保证每个身份最多一个当前窗口，`content_epoch` 阻止清空前的旧摘要回写。
 
 `messages` 使用 UUIDv7 主键，通过外键归属会话，包含 `user`/`assistant` 角色、正文、生成状态、会话内顺序、可选错误码以及创建/更新时间。状态允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。数据库强制同一会话内 `sequence` 唯一且非负；删除会话会级联删除消息。
+
+`model_calls` 保存真实模型调用的目的、状态、模型名、耗时、token 用量、结束原因及调用时身份快照。它不保存提示词、回复正文或密钥。清空当前窗口的消息时保留调用记录；删除整个内部窗口时按外键级联删除。
 
 当前页面只获取唯一窗口并清空其中的消息；旧创建、列表、单会话删除接口暂时兼容旧客户端。流式接口保存完整用户/助手回合、恢复数据库上下文，并持久化助手草稿和最终状态。
 
@@ -78,9 +86,9 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。历史查询保留终态助手的空正文，业务层才能判断最后一次尝试是否为空；失败或取消的非空正文附加内部中断标记，空回复只保留用户问题。多个助手终态属于同一用户消息时以最后一次为准；当前“再次提问”创建新的用户/助手回合，不把相同问题自动合并。会话不存在时返回结构化 404。
 
-S4-3 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。真实模型模式下，超过最近 10 个回合的旧记录按每次最多 3 回合滚动压缩；摘要覆盖边界之前的原文不再重复送入主模型。摘要放在系统背景信息中，近期消息仍按 S4-1 预算和 S4-2 回合规则选择。摘要生成或保存失败时使用原文继续回答；并发更新以旧覆盖边界为条件，避免旧请求覆盖新摘要。演示模型不生成摘要。数据库必须先升级到 `0003_conversation_summary`。
+S4-3 由 `0003_conversation_summary` 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。真实模型模式下，超过最近 10 个回合的旧记录按每次最多 3 回合滚动压缩；摘要覆盖边界之前的原文不再重复送入主模型。摘要放在系统背景信息中，近期消息仍按 S4-1 预算和 S4-2 回合规则选择。摘要生成或保存失败时使用原文继续回答；并发更新以旧覆盖边界和 `content_epoch` 为条件，避免旧请求覆盖新摘要或在清空后回写。演示模型不生成摘要。当前数据库应统一升级到 head `0006_single_window`。
 
-S4-4 增加 `model_calls` 表，按 `purpose=summary|reply` 区分两次真实模型调用。方舟流式请求设置 `stream_options.include_usage=true`，适配器解析可能出现在 `choices=[]` 尾块中的 `usage`，同时读取模型名和 `finish_reason`；模型流关闭时记录耗时。结束状态按服务端实际结果保存为 `completed/failed/cancelled`。供应商未返回的 token 字段及结束原因保持 `NULL`，不使用估算值或推断值替代；演示 Provider 不生成真实调用记录。调用记录不包含密钥和对话正文，写入失败不会修改对话消息的终态。新代码需要迁移到 `0004_model_calls`。
+S4-4 由 `0004_model_calls` 增加 `model_calls` 表，按 `purpose=summary|reply` 区分两次真实模型调用。方舟流式请求设置 `stream_options.include_usage=true`，适配器解析可能出现在 `choices=[]` 尾块中的 `usage`，同时读取模型名和 `finish_reason`；模型流关闭时记录耗时。结束状态按服务端实际结果保存为 `completed/failed/cancelled`。供应商未返回的 token 字段及结束原因保持 `NULL`，不使用估算值或推断值替代；演示 Provider 不生成真实调用记录。调用记录不包含密钥和对话正文，写入失败不会修改对话消息的终态。当前 schema head 为 `0006_single_window`。
 
 S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cookie 的哈希）表。浏览器先调用 `/api/v1/identity/bootstrap`；注册、登录、退出由 `/api/v1/identity/*` 处理。所有会话 REST 与 SSE 接口从 Cookie 解析身份并按 `owner_id` 校验；对非本人会话返回 404。当前登录和退出只切换到各自独立的窗口，不迁移消息；`model_calls` 的调用时用量归属快照保持不变。前端不展示 token。生产环境需要同站 HTTPS Cookie 部署，服务端允许配置的前端 Origin 携带凭证；新代码需要迁移到 `0006_single_window`。
 
@@ -101,13 +109,13 @@ S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cook
 }
 ```
 
-响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。S4-1 进一步按可配置窗口、输出预留和安全余量控制估算输入预算；单独超预算的本次问题在写库前返回 422 `input_budget_exceeded`。方舟请求显式设置 `max_tokens`；实际 token 用量目前尚未采集。
+响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。S4-1 进一步按可配置窗口、输出预留和安全余量控制估算输入预算；单独超预算的本次问题在写库前返回 422 `input_budget_exceeded`。方舟请求显式设置 `max_tokens`；供应商实际返回的 token 用量写入 `model_calls`，未返回的值保持 `NULL`。
 
-当前前端 `http-reply-provider.ts` 只向带会话 ID 的接口提交本次 `message`，不再提交 `history`。服务端从数据库选择最多 20 条历史并处理失败或取消回复的中断标记。用户停止或切换会话时，前端会取消 HTTP 请求。
+当前前端 `http-reply-provider.ts` 只向带窗口 ID 的接口提交本次 `message`，不再提交 `history`。服务端从数据库选择最多 20 条历史并处理失败或取消回复的中断标记。用户停止、登录、退出或离开页面时，前端会取消当前 HTTP 请求。
 
 `message.failed` 的 `code` 当前包括 `provider_not_configured`、`provider_auth_failed`、`model_not_available`、`provider_rate_limited`、`provider_timeout`、`provider_unreachable` 和 `generation_failed`。前端据此决定错误提示和是否提供重试；服务端错误文案不包含上游响应正文或密钥。
 
-客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。新接口保存用户问题、助手草稿和最终状态；刷新或切换后可通过消息查询接口恢复。
+客户端断开连接时，框架关闭外层 SSE 生成器；`stream_conversation` 在 `finally` 中主动关闭 Provider 异步流，使 `httpx` 离开上游响应上下文。该传播行为有自动化测试覆盖，但模型供应商是否立即停止计算或计费取决于供应商。新接口保存用户问题、助手草稿和最终状态；刷新页面或切换身份后按对应窗口恢复。
 
 上面的无会话 ID 接口是旧版兼容接口，仍由调用方提供 `history`，也不会写入数据库。当前前端已经切换到带会话 ID 的接口；旧接口只为兼容和独立调试暂时保留，后续评估后移除。
 

@@ -72,7 +72,7 @@ class ConversationRepository:
         return found is not None
 
     async def get(self, conversation_id: UUID, *, owner_id: UUID | None = None) -> Conversation | None:
-        """按主键读取单个会话，供直接打开 URL 时验证并取得标题。"""
+        """按主键读取本人窗口，供旧兼容接口和内部查询使用。"""
         return await self.session.scalar(select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == owner_id))
 
     async def list_messages(
@@ -84,7 +84,7 @@ class ConversationRepository:
         owner_id: UUID | None = None,
     ) -> tuple[list[Message], bool, int | None]:
         """使用 sequence 游标读取最新一页，并返回下一页信息。"""
-        # 在实际读取 SQL 中再次校验归属，避免检查与查询之间发生导入转移。
+        # 在实际读取 SQL 中再次校验归属，避免检查后身份或窗口状态变化造成越权读取。
         statement = (
             select(Message).join(Conversation, Message.conversation_id == Conversation.id)
             .where(Message.conversation_id == conversation_id, Conversation.owner_id == owner_id)
@@ -104,7 +104,7 @@ class ConversationRepository:
 
     async def delete(self, conversation_id: UUID, *, owner_id: UUID | None = None) -> bool:
         """删除会话；不存在返回 False，消息由数据库外键级联删除。"""
-        # 删除与游客导入并发时锁住会话行；归属变化后的旧身份不能继续删除。
+        # 删除时锁住窗口行；归属变化后的旧身份不能继续删除。
         conversation = await self.session.scalar(
             select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == owner_id).with_for_update()
         )
