@@ -108,6 +108,22 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("你好", "".join(events))
         self.assertEqual(events[-1], "event: message.completed\ndata: {}\n\n")
 
+    def test_summary_is_system_context_and_not_a_displayed_message(self) -> None:
+        captured: list[tuple[list, str]] = []
+
+        class RecordingProvider:
+            async def stream_reply(self, messages, system_prompt):
+                captured.append((messages, system_prompt))
+                yield "回答"
+
+        async def collect() -> None:
+            request = StreamMessageRequest(message="当前问题", context_summary="较早的关键信息")
+            _ = [event async for event in stream_conversation(request, RecordingProvider())]
+
+        asyncio.run(collect())
+        self.assertIn("较早的关键信息", captured[0][1])
+        self.assertEqual([(item.role, item.content) for item in captured[0][0]], [("user", "当前问题")])
+
     def test_event_payload_is_valid_json(self) -> None:
         async def collect() -> list[str]:
             request = StreamMessageRequest(message="测试")

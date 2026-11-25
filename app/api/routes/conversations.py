@@ -6,7 +6,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversations.persistence import stream_persisted_conversation
+from app.conversations.models import Message
 from app.conversations.repository import ConversationRepository
+from app.conversations.summary import refresh_summary
 from app.conversations.schemas import (
     ConversationCreate,
     ConversationList,
@@ -159,15 +161,34 @@ async def stream_conversation_message(
     stored_history = await repository.load_model_history(
         conversation_id,
         before_sequence=user_sequence,
+        scan_limit=None,
     )
-    history = build_database_history(
-        stored_history, token_budget=budget, current_message=request.message,
-    )
+    # rollback 会使 ORM 实例过期；先复制摘要和裁剪所需标量，避免模型阶段隐式访问数据库。
+    history_snapshot = [
+        Message(role=item.role, content=item.content, status=item.status, sequence=item.sequence)
+        for item in stored_history
+    ]
     # SELECT 会自动开启只读事务；模型流开始前显式结束它，避免慢模型长时间
     # 占用 PostgreSQL 连接。Session 本身稍后仍由依赖统一关闭。
     await session.rollback()
     provider = create_llm_provider(settings)
-    stream_request = StreamMessageRequest(message=request.message, history=history)
+    # 摘要仅在真实模型下按需更新；失败时继续依靠近期原文回答。
+    summary, covered_sequence = ("", -1)
+    if settings.llm_provider == "openai_compatible":
+        try:
+            summary, covered_sequence = await refresh_summary(manager, provider, conversation_id, history_snapshot)
+        except Exception:
+            # 摘要是增强功能；读取或更新失败时仍用近期原文完成本次问答。
+            summary, covered_sequence = "", -1
+    if current_input_tokens(request.message, summary) > budget:
+        summary, covered_sequence = "", -1
+    history = build_database_history(
+        [item for item in history_snapshot if item.sequence > covered_sequence],
+        token_budget=budget,
+        current_message=request.message,
+        context_summary=summary,
+    )
+    stream_request = StreamMessageRequest(message=request.message, history=history, context_summary=summary)
     events = stream_persisted_conversation(
         stream_request,
         provider,

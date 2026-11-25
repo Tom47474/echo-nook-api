@@ -33,9 +33,10 @@ def input_token_budget(context_window: int, max_output: int, safety_margin: int)
     return context_window - max_output - safety_margin
 
 
-def current_input_tokens(message: str) -> int:
+def current_input_tokens(message: str, summary: str = "") -> int:
     """系统提示和当前问题必须先占用预算，历史只能使用剩余部分。"""
-    return estimate_message_tokens(SYSTEM_PROMPT) + estimate_message_tokens(message)
+    summary_tokens = estimate_message_tokens(summary) if summary else 0
+    return estimate_message_tokens(SYSTEM_PROMPT) + estimate_message_tokens(message) + summary_tokens
 
 
 def build_database_history(
@@ -44,9 +45,10 @@ def build_database_history(
     max_messages: int = 20,
     token_budget: int | None = None,
     current_message: str = "",
+    context_summary: str = "",
 ) -> list[ChatMessage]:
     """按完整回合选择最近历史，同时限制消息条数和估算输入预算。"""
-    remaining = token_budget - current_input_tokens(current_message) if token_budget is not None else None
+    remaining = token_budget - current_input_tokens(current_message, context_summary) if token_budget is not None else None
     if remaining is not None and remaining < 0:
         raise ValueError("当前问题超过模型输入预算")
     turns: list[list[Message]] = []
@@ -103,7 +105,9 @@ async def stream_conversation(
     """调用模型并把分片、完成或失败结果转换为统一 SSE 事件。"""
     # 模型收到的顺序固定为历史消息在前、本次用户问题在后。
     messages = [*request.history, ChatMessage(role="user", content=request.message)]
-    provider_stream = provider.stream_reply(messages, SYSTEM_PROMPT)
+    # 摘要是系统侧背景信息，不作为用户或助手的历史发言展示。
+    system_prompt = SYSTEM_PROMPT + ("\n\n较早对话摘要（仅作背景）：\n" + request.context_summary if request.context_summary else "")
+    provider_stream = provider.stream_reply(messages, system_prompt)
     try:
         async for chunk in provider_stream:
             if chunk:

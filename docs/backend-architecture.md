@@ -76,6 +76,8 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 `POST /api/v1/conversations/{id}/messages:stream` 只接受 `{"message":"..."}`，额外传入 `history` 会返回 422。服务端锁定会话，连续分配用户与助手两个 `sequence`，以 `user/completed` 和 `assistant/streaming` 原子创建回合，然后读取当前问题之前的数据库记录，按完整回合裁剪为最多 20 条上下文，再调用模型。历史查询保留终态助手的空正文，业务层才能判断最后一次尝试是否为空；失败或取消的非空正文附加内部中断标记，空回复只保留用户问题。多个助手终态属于同一用户消息时以最后一次为准；当前“再次提问”创建新的用户/助手回合，不把相同问题自动合并。会话不存在时返回结构化 404。
 
+S4-3 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。真实模型模式下，超过最近 10 个回合的旧记录按每次最多 3 回合滚动压缩；摘要覆盖边界之前的原文不再重复送入主模型。摘要放在系统背景信息中，近期消息仍按 S4-1 预算和 S4-2 回合规则选择。摘要生成或保存失败时使用原文继续回答；并发更新以旧覆盖边界为条件，避免旧请求覆盖新摘要。演示模型不生成摘要。数据库必须先升级到 `0003_conversation_summary`。
+
 新流首先发送 `message.started`，携带两条消息的 UUID 和 sequence，供前端把临时消息与数据库记录对齐。正文仍通过 `message.delta` 发送；`message.completed` 发送前保存完整正文和 `completed`，`message.failed` 发送前保存部分正文、`failed` 和结构化 `error_code`。客户端中断或外层生成器关闭时保存 `cancelled`。
 
 草稿不是逐 token 写库：收到新分片时，若累计新增 200 字符或距上次保存达到 1 秒，就使用独立短事务更新 `streaming` 正文。模型流期间不长期持有数据库连接。进程被强制终止时，可能丢失最近一个检查点之后的草稿；下次单进程应用启动会把遗留的 `assistant/streaming` 更新为 `failed`，错误码为 `generation_interrupted`。

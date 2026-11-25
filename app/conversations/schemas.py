@@ -15,6 +15,7 @@ class ChatMessage(BaseModel):
 class StreamMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
+    context_summary: str = Field(default="", max_length=2000)
 
 
 class ConversationStreamRequest(BaseModel):

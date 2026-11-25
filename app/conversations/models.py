@@ -60,6 +60,9 @@ class Conversation(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    # 摘要仅覆盖已结束的旧回合；序号用于防止与近期原文重复或并发回退。
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    summary_through_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=-1, server_default="-1")
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
         cascade="all, delete-orphan",

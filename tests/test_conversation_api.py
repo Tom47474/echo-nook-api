@@ -14,11 +14,80 @@ from app.conversations.models import (
 )
 from app.conversations.service import current_input_tokens
 from app.conversations.repository import ConversationRepository
+from app.conversations.summary import refresh_summary, summary_source
 from app.core.config import Settings
 from app.main import create_app, lifespan
 
 
 class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_history_summary_updates_and_failure_falls_back(self) -> None:
+        conversation = await self.create_conversation("长对话摘要")
+        conversation_id = UUID(conversation["id"])
+        messages = [
+            Message(role=role, content=f"第 {turn} 回合 {role}",
+                    status=MessageStatus.COMPLETED.value, sequence=turn * 2 + offset)
+            for turn in range(13)
+            for offset, role in enumerate((MessageRole.USER.value, MessageRole.ASSISTANT.value))
+        ]
+        self.assertEqual(summary_source(messages, -1)[1], 5)
+
+        class SummaryProvider:
+            async def stream_reply(self, messages, system_prompt):
+                yield "用户讨论了前几个回合。"
+
+        manager = self.app.state.database_manager
+        summary, through = await refresh_summary(manager, SummaryProvider(), conversation_id, messages)
+        self.assertEqual((summary, through), ("用户讨论了前几个回合。", 5))
+        async with manager.session() as session:
+            stored = await session.get(Conversation, conversation_id)
+            self.assertEqual((stored.summary, stored.summary_through_sequence), (summary, through))
+
+        class FailingProvider:
+            async def stream_reply(self, messages, system_prompt):
+                raise RuntimeError("摘要生成失败")
+                yield ""
+
+        # 增加三个回合使摘要再次达到更新阈值；失败时旧摘要和边界保持有效。
+        extended = messages + [
+            Message(role=role, content=f"第 {turn} 回合 {role}",
+                    status=MessageStatus.COMPLETED.value, sequence=turn * 2 + offset)
+            for turn in range(13, 16)
+            for offset, role in enumerate((MessageRole.USER.value, MessageRole.ASSISTANT.value))
+        ]
+        self.assertEqual(await refresh_summary(manager, FailingProvider(), conversation_id, extended), (summary, through))
+
+    async def test_stream_combines_summary_with_recent_original_turns(self) -> None:
+        conversation = await self.create_conversation("摘要与原文")
+        conversation_id = UUID(conversation["id"])
+        async with self.app.state.database_manager.session() as session:
+            session.add_all([
+                Message(conversation_id=conversation_id, role=role,
+                        content=f"第 {turn} 回合 {role}", status=MessageStatus.COMPLETED.value,
+                        sequence=turn * 2 + offset)
+                for turn in range(13)
+                for offset, role in enumerate((MessageRole.USER.value, MessageRole.ASSISTANT.value))
+            ])
+            await session.commit()
+
+        calls: list[tuple[list, str]] = []
+
+        class RecordingProvider:
+            async def stream_reply(self, messages, system_prompt):
+                calls.append((messages, system_prompt))
+                yield "较早对话摘要" if "压缩" in system_prompt else "正常回答"
+
+        self.app.state.settings = self.app.state.settings.model_copy(update={"llm_provider": "openai_compatible"})
+        with patch("app.api.routes.conversations.create_llm_provider", return_value=RecordingProvider()):
+            response = await self.client.post(
+                f"/api/v1/conversations/{conversation_id}/messages:stream",
+                json={"message": "当前问题"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("较早对话摘要", calls[1][1])
+        self.assertNotIn("第 0 回合", str(calls[1][0]))
+        self.assertIn("第 3 回合", str(calls[1][0]))
+
     async def asyncSetUp(self) -> None:
         settings = Settings(app_env="test")
         if not settings.test_database_url.get_secret_value():

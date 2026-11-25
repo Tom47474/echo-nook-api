@@ -157,10 +157,10 @@ class ConversationRepository:
         conversation_id: UUID,
         *,
         before_sequence: int,
-        scan_limit: int = 100,
+        scan_limit: int | None = 100,
     ) -> list[Message]:
         """读取当前问题之前可进入模型上下文的最近消息。"""
-        result = await self.session.scalars(
+        statement = (
             select(Message)
             .where(
                 Message.conversation_id == conversation_id,
@@ -174,7 +174,9 @@ class ConversationRepository:
                 ),
             )
             .order_by(Message.sequence.desc())
-            .limit(scan_limit)
         )
+        if scan_limit is not None:
+            statement = statement.limit(scan_limit)
+        result = await self.session.scalars(statement)
         # SQL 为倒序取最近数据，返回业务层前恢复为时间正序。
         return list(reversed(list(result)))

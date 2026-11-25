@@ -12,7 +12,7 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | `conversations`、`messages`；迁移版本为 `0002_conversation_messages` |
+| 业务表 | `conversations`、`messages`；当前迁移版本为 `0003_conversation_summary`，会话表含摘要和覆盖序号 |
 | 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
@@ -208,4 +208,4 @@ APP_ENV=test .venv/bin/alembic current
 
 ### 应用启动时数据库连接失败
 
-先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0002_conversation_messages`。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0003_conversation_summary`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
