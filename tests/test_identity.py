@@ -12,6 +12,15 @@ from app.main import create_app, lifespan
 
 
 class IdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_window_is_stable_and_isolated_across_guests(self) -> None:
+        first = await self.guest_client.get("/api/v1/conversations/current")
+        again = await self.guest_client.get("/api/v1/conversations/current")
+        other = await self.other_client.get("/api/v1/conversations/current")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["id"], again.json()["id"])
+        self.assertNotEqual(first.json()["id"], other.json()["id"])
+        self.assertEqual((await self.other_client.get(f"/api/v1/conversations/{first.json()['id']}")).status_code, 404)
+
     async def asyncSetUp(self) -> None:
         settings = Settings(app_env="test")
         if not settings.test_database_url.get_secret_value():
@@ -98,11 +107,14 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["access-control-allow-credentials"], "true")
         self.assertEqual(response.headers["access-control-allow-origin"], "http://localhost:3000")
 
-    async def test_confirmed_import_keeps_history_usage_owner_and_original_id(self) -> None:
-        created = await self.guest_client.post("/api/v1/conversations", json={"title": "游客会话"})
+    async def test_identity_switch_and_clear_keep_guest_account_and_usage_separate(self) -> None:
+        created = await self.guest_client.get("/api/v1/conversations/current")
         conversation_id = UUID(created.json()["id"])
         guest_id = self.principal_ids[0]
+        # 旧消息和用量记录属于游客；登录账号后不得静默迁移。
         async with self.app.state.database_manager.session() as session:
+            from app.conversations.models import Message
+            session.add(Message(conversation_id=conversation_id, role="user", content="游客消息", status="completed", sequence=0))
             session.add(ModelCall(conversation_id=conversation_id, purpose="reply", status="completed",
                                   usage_owner_id=guest_id, usage_owner_kind="guest", total_tokens=10))
             await session.commit()
@@ -111,12 +123,19 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(registered.status_code, 200)
         account_id = UUID(registered.json()["id"])
         self.principal_ids.append(account_id)
-        self.assertEqual(registered.json()["importable_count"], 1)
-        self.assertEqual((await self.guest_client.get("/api/v1/conversations")).json()["items"], [])
-        imported = await self.guest_client.post("/api/v1/identity/import")
-        self.assertEqual(imported.json(), {"imported_count": 1})
-        self.assertEqual((await self.guest_client.get(f"/api/v1/conversations/{conversation_id}")).status_code, 200)
-        self.assertEqual((await self.guest_client.post("/api/v1/identity/import")).status_code, 409)
+        account_window = await self.guest_client.get("/api/v1/conversations/current")
+        account_conversation_id = UUID(account_window.json()["id"])
+        self.assertNotEqual(account_conversation_id, conversation_id)
+        self.assertEqual((await self.guest_client.get(f"/api/v1/conversations/{conversation_id}")).status_code, 404)
+        self.assertEqual((await self.guest_client.get(f"/api/v1/conversations/{account_conversation_id}/messages")).json()["items"], [])
+        self.assertEqual((await self.guest_client.post("/api/v1/identity/import")).status_code, 404)
+        self.assertEqual((await self.guest_client.delete("/api/v1/conversations/current/messages")).status_code, 204)
+        logged_out = await self.guest_client.post("/api/v1/identity/logout")
+        self.assertEqual(UUID(logged_out.json()["id"]), guest_id)
+        self.assertEqual(UUID((await self.guest_client.get("/api/v1/conversations/current")).json()["id"]), conversation_id)
+        self.assertEqual(len((await self.guest_client.get(f"/api/v1/conversations/{conversation_id}/messages")).json()["items"]), 1)
+        self.assertEqual((await self.guest_client.delete("/api/v1/conversations/current/messages")).status_code, 204)
+        self.assertEqual((await self.guest_client.get(f"/api/v1/conversations/{conversation_id}/messages")).json()["items"], [])
         async with self.app.state.database_manager.session() as session:
             call = await session.scalar(select(ModelCall).where(ModelCall.conversation_id == conversation_id))
             self.assertEqual((call.usage_owner_id, call.usage_owner_kind), (guest_id, "guest"))

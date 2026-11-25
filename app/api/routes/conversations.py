@@ -38,7 +38,29 @@ def conversation_not_found() -> HTTPException:
     )
 
 
-@router.post("", response_model=ConversationRead, status_code=status.HTTP_201_CREATED)
+@router.get("/current", response_model=ConversationRead)
+async def get_current_conversation(
+    session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
+) -> ConversationRead:
+    """返回当前身份唯一的窗口；首次访问时在数据库中创建。"""
+    conversation = await ConversationRepository(session).current(identity.id)
+    await session.commit()
+    return ConversationRead.model_validate(conversation)
+
+
+@router.delete("/current/messages", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_current_conversation(
+    session: AsyncSession = Depends(get_db_session),
+    identity: Principal = Depends(require_identity),
+) -> Response:
+    """仅清空当前身份的消息和摘要，保留其他身份与内部调用记录。"""
+    await ConversationRepository(session).clear_current(identity.id)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("", response_model=ConversationRead, status_code=status.HTTP_201_CREATED, deprecated=True)
 async def create_conversation(
     payload: ConversationCreate,
     session: AsyncSession = Depends(get_db_session),
@@ -52,7 +74,7 @@ async def create_conversation(
     return ConversationRead.model_validate(conversation)
 
 
-@router.get("", response_model=ConversationList)
+@router.get("", response_model=ConversationList, deprecated=True)
 async def list_conversations(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
@@ -64,7 +86,7 @@ async def list_conversations(
     return ConversationList(items=items, total=total, offset=offset, limit=limit)
 
 
-@router.get("/{conversation_id}", response_model=ConversationRead)
+@router.get("/{conversation_id}", response_model=ConversationRead, deprecated=True)
 async def get_conversation(
     conversation_id: UUID,
     session: AsyncSession = Depends(get_db_session),
@@ -103,7 +125,7 @@ async def list_conversation_messages(
     )
 
 
-@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT, deprecated=True)
 async def delete_conversation(
     conversation_id: UUID,
     session: AsyncSession = Depends(get_db_session),
@@ -221,7 +243,7 @@ async def stream_conversation_message(
     return create_streaming_response(events)
 
 
-@router.post("/messages:stream")
+@router.post("/messages:stream", deprecated=True)
 async def stream_message(
     request: StreamMessageRequest,
     settings: Settings = Depends(get_app_settings),

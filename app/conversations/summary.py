@@ -47,7 +47,7 @@ async def refresh_summary(
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None:
             return "", -1
-        previous, through = conversation.summary, conversation.summary_through_sequence
+        previous, through, epoch = conversation.summary, conversation.summary_through_sequence, conversation.content_epoch
 
     source = summary_source(messages, through)
     if source is None:
@@ -89,7 +89,8 @@ async def refresh_summary(
     async with manager.session() as session:
         result = await session.execute(
             update(Conversation)
-            .where(Conversation.id == conversation_id, Conversation.summary_through_sequence == through)
+            .where(Conversation.id == conversation_id, Conversation.summary_through_sequence == through,
+                   Conversation.content_epoch == epoch)
             .values(summary=updated_summary, summary_through_sequence=new_through)
         )
         if result.rowcount:

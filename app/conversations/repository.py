@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversations.models import (
@@ -8,6 +8,7 @@ from app.conversations.models import (
     Message,
     MessageRole,
     MessageStatus,
+    Principal,
 )
 
 
@@ -16,6 +17,30 @@ class ConversationRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    async def current(self, owner_id: UUID) -> Conversation:
+        """锁定身份后取得或创建唯一窗口，阻止两个首次请求并发创建。"""
+        await self.session.scalar(select(Principal.id).where(Principal.id == owner_id).with_for_update())
+        conversation = await self.session.scalar(select(Conversation).where(
+            Conversation.owner_id == owner_id, Conversation.is_current.is_(True)
+        ))
+        if conversation is None:
+            conversation = Conversation(owner_id=owner_id, title="对话", is_current=True)
+            self.session.add(conversation)
+            await self.session.flush()
+            await self.session.refresh(conversation)
+        return conversation
+
+    async def clear_current(self, owner_id: UUID) -> None:
+        """清空当前身份消息及上下文；保留调用记录供成本核算。"""
+        conversation = await self.current(owner_id)
+        # 发送回合也锁同一会话行，清空与开始发送因此有确定的事务顺序。
+        await self.session.scalar(select(Conversation.id).where(Conversation.id == conversation.id).with_for_update())
+        await self.session.execute(delete(Message).where(Message.conversation_id == conversation.id))
+        conversation.summary = ""
+        conversation.summary_through_sequence = -1
+        conversation.content_epoch += 1
+        await self.session.flush()
 
     async def create(self, title: str, *, owner_id: UUID | None = None) -> Conversation:
         """创建会话但不提交事务，由调用接口统一决定提交时机。"""
@@ -128,7 +153,7 @@ class ConversationRepository:
         )
         # 两条消息在释放行锁前一起 flush，防止并发回合交叉占用 sequence。
         self.session.add_all((user_message, assistant_message))
-        # 新消息应使会话回到列表顶部；更新时间由数据库生成。
+        # 更新时间仍记录最后活动时刻；当前页面虽无列表，旧接口仍使用该字段。
         conversation.updated_at = func.now()
         await self.session.flush()
         await self.session.refresh(user_message)
@@ -156,7 +181,7 @@ class ConversationRepository:
         message.status = status.value
         message.error_code = error_code
         message.updated_at = func.now()
-        # 草稿和终态变化都会刷新会话时间，使活跃会话保持在列表顶部。
+        # 草稿和终态变化更新窗口活动时间，供运行排查与旧接口读取。
         conversation = await self.session.get(Conversation, message.conversation_id)
         if conversation is not None:
             conversation.updated_at = func.now()

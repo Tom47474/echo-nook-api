@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text as sa_text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,16 +34,21 @@ class MessageStatus(StrEnum):
 
 
 class Conversation(Base):
-    """会话容器，保存标题、归属预留字段和消息集合。"""
+    """内部消息容器；当前页面每个身份只使用一个标记为当前的窗口。"""
 
     __tablename__ = "conversations"
     __table_args__ = (
         # 旧版会话可能没有归属；S5-1 起新会话必须由路由写入当前身份并按该字段授权。
         Index("ix_conversations_owner_updated_at", "owner_id", "updated_at"),
+        Index("uq_conversations_current_owner", "owner_id", unique=True, postgresql_where=sa_text("is_current = true")),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
     owner_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("principals.id", name="fk_conversations_owner_id"), nullable=True)
+    # 每个身份只允许一个当前窗口；旧版兼容接口创建的容器不参与当前窗口。
+    is_current: Mapped[bool] = mapped_column(default=False, server_default="false", nullable=False)
+    # 清空时递增，防止清空前在途的摘要任务重新写入旧内容。
+    content_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     title: Mapped[str] = mapped_column(
         String(200),
         nullable=False,

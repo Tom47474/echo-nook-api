@@ -12,7 +12,7 @@
 | 应用账号 | `echo_nook`，普通账号，不是超级用户 |
 | 开发数据库 | `echo_nook_dev` |
 | 测试数据库 | `echo_nook_test` |
-| 业务表 | `principals`、`identity_sessions`、`conversations`、`messages`、`model_calls`；当前迁移版本为 `0005_identity` |
+| 业务表 | `principals`、`identity_sessions`、`conversations`、`messages`、`model_calls`；当前迁移版本为 `0006_single_window` |
 | 代码接入 | 已接入 SQLAlchemy 2.1、asyncpg 0.32 和 Alembic 1.20 |
 
 开发库和测试库运行在同一个 PostgreSQL 服务中，但数据彼此隔离。日常本地运行使用 `echo_nook_dev`；自动化测试和可能清空数据的测试操作只能使用 `echo_nook_test`。
@@ -35,7 +35,10 @@ LIMIT 20;
 
 - UUIDv7 `id`、标题、创建时间和更新时间。
 - `owner_id` 关联 `principals.id`，会话接口按当前游客或账号身份过滤；旧数据仍可能为 `NULL`，不能被任意新身份访问。
-- `(owner_id, updated_at)` 索引用于按身份列出最近会话。
+- `is_current=true` 标记当前窗口，条件唯一索引保证每个身份最多一个当前窗口；`content_epoch` 防止清空前的摘要任务回写旧内容。
+- `(owner_id, updated_at)` 索引保留给旧版兼容查询。
+
+`0006_single_window` 将同一身份旧版多个会话的消息和模型调用记录迁入一个当前窗口，重新排列消息序号并重置合并摘要；不同身份的记录绝不合并。没有归属的旧会话仍不能自动认领。页面通过 `GET /api/v1/conversations/current` 取得唯一窗口，`DELETE /api/v1/conversations/current/messages` 只清空当前身份的消息和摘要；调用记录保留。
 
 `messages` 保存会话内消息：
 
@@ -220,7 +223,7 @@ APP_ENV=test .venv/bin/alembic current
 
 ### 应用启动时数据库连接失败
 
-先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0005_identity`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
+先确认 PostgreSQL 正常运行、当前环境对应的连接变量存在，并执行 `.venv/bin/alembic upgrade head`。应用启动时会执行数据库连通性检查；可用 `.venv/bin/alembic current` 确认当前版本为 `0006_single_window`。本地开发库和测试库已升级；其他部署环境需各自执行迁移。
 
 ### 开发库旧会话认领
 
@@ -231,4 +234,4 @@ APP_ENV=test .venv/bin/alembic current
 .venv/bin/python -m app.scripts.claim_legacy --owner <bootstrap 返回的 id> --apply
 ```
 
-命令只允许 `APP_ENV=development`，默认仅预览数量；执行时只认领仍为 `NULL` 的旧会话，不改动已有归属。刷新前端即可看到被认领的历史。测试库和正式库不得用此开发命令；部署时应分别规划可信的历史归属迁移。
+命令只允许 `APP_ENV=development`，默认仅预览数量；执行时只认领仍为 `NULL` 的旧会话，并把旧消息、调用记录安全并入目标身份的当前窗口，不改动其他身份的归属。若该身份已有窗口，原消息按时间顺序重新编号，摘要重新生成；先确认目标身份确实属于自己。刷新前端即可在唯一窗口看到被认领的消息。测试库和正式库不得用此开发命令；部署时应分别规划可信的历史归属迁移。

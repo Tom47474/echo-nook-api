@@ -50,21 +50,23 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 
 ## 数据模型
 
-`conversations` 使用 UUIDv7 主键，包含标题、创建/更新时间以及可空的 `owner_id`。`owner_id` 只为 S5-1 身份与归属校验预留，目前没有用户表、外键或授权作用，开放给其他用户前必须补齐身份绑定和历史数据归属策略。
+`conversations` 使用 UUIDv7 主键，包含标题、创建/更新时间、可空的 `owner_id`、`is_current` 和 `content_epoch`。`owner_id` 外键关联游客或账号身份并用于授权；可空仅为无可信归属的旧数据保留。`is_current=true` 的条件唯一索引保证每个身份最多一个当前窗口，`content_epoch` 阻止清空前的旧摘要回写。
 
 `messages` 使用 UUIDv7 主键，通过外键归属会话，包含 `user`/`assistant` 角色、正文、生成状态、会话内顺序、可选错误码以及创建/更新时间。状态允许 `pending`、`streaming`、`completed`、`failed`、`cancelled`。数据库强制同一会话内 `sequence` 唯一且非负；删除会话会级联删除消息。
 
-当前会话接口能够创建、列出和删除会话，并查询已经存在的消息。新的流式接口会保存完整用户/助手回合、恢复数据库上下文，并持久化助手草稿和最终状态。
+当前页面只获取唯一窗口并清空其中的消息；旧创建、列表、单会话删除接口暂时兼容旧客户端。流式接口保存完整用户/助手回合、恢复数据库上下文，并持久化助手草稿和最终状态。
 
 ## 当前接口契约
 
 `GET /health` 返回 `{"status":"ok"}`。
 
-`POST /api/v1/conversations` 接受可选的 `title`，创建成功返回 201 和会话对象。标题默认“新对话”，会去除首尾空格，长度为 1 至 200。
+`GET /api/v1/conversations/current` 原子取得或创建当前身份的唯一窗口。`DELETE /api/v1/conversations/current/messages` 清空当前身份的消息和摘要，调用记录保留。
+
+旧 `POST /api/v1/conversations` 接受可选的 `title`，创建成功返回 201 和会话对象。标题默认“新对话”，会去除首尾空格，长度为 1 至 200；当前前端不再调用。
 
 `GET /api/v1/conversations` 使用 `offset`（默认 0）和 `limit`（默认 20，最大 100），返回 `items`、`total`、`offset`、`limit`。结果按 `updated_at DESC, id DESC` 排列，UUID 作为时间相同情况下的稳定排序键。
 
-`GET /api/v1/conversations/{id}` 按 ID 返回单个会话；不存在时返回结构化 404。前端直达链接用此接口验证目标，即使它不在会话列表第一页也可以恢复。
+`GET /api/v1/conversations/{id}` 仍供旧版客户端按 ID 读取，非本人或不存在时返回结构化 404。当前前端改用 `GET /api/v1/conversations/current`，不再提供会话直达链接。
 
 `GET /api/v1/conversations/{id}/messages` 使用 `limit`（默认 50，最大 100）和可选 `before_sequence`。接口从最新消息向前取一页，但 `items` 始终按 `sequence` 正序返回；`has_more` 和 `next_before_sequence` 指示下一页。
 
@@ -80,7 +82,7 @@ S4-3 在 `conversations` 表增加 `summary` 和 `summary_through_sequence`。�
 
 S4-4 增加 `model_calls` 表，按 `purpose=summary|reply` 区分两次真实模型调用。方舟流式请求设置 `stream_options.include_usage=true`，适配器解析可能出现在 `choices=[]` 尾块中的 `usage`，同时读取模型名和 `finish_reason`；模型流关闭时记录耗时。结束状态按服务端实际结果保存为 `completed/failed/cancelled`。供应商未返回的 token 字段及结束原因保持 `NULL`，不使用估算值或推断值替代；演示 Provider 不生成真实调用记录。调用记录不包含密钥和对话正文，写入失败不会修改对话消息的终态。新代码需要迁移到 `0004_model_calls`。
 
-S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cookie 的哈希）表。浏览器先调用 `/api/v1/identity/bootstrap`；注册、登录、退出和确认导入由 `/api/v1/identity/*` 处理。所有会话 REST 与 SSE 接口从 Cookie 解析身份并按 `owner_id` 校验；对非本人会话返回 404。登录不会自动导入游客会话，用户确认后才在事务中转移 `owner_id`；`model_calls` 的调用时用量归属快照保持不变。前端不展示 token。生产环境需要同站 HTTPS Cookie 部署，服务端允许配置的前端 Origin 携带凭证；新代码需要迁移到 `0005_identity`。
+S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cookie 的哈希）表。浏览器先调用 `/api/v1/identity/bootstrap`；注册、登录、退出由 `/api/v1/identity/*` 处理。所有会话 REST 与 SSE 接口从 Cookie 解析身份并按 `owner_id` 校验；对非本人会话返回 404。当前登录和退出只切换到各自独立的窗口，不迁移消息；`model_calls` 的调用时用量归属快照保持不变。前端不展示 token。生产环境需要同站 HTTPS Cookie 部署，服务端允许配置的前端 Origin 携带凭证；新代码需要迁移到 `0006_single_window`。
 
 新流首先发送 `message.started`，携带两条消息的 UUID 和 sequence，供前端把临时消息与数据库记录对齐。正文仍通过 `message.delta` 发送；`message.completed` 发送前保存完整正文和 `completed`，`message.failed` 发送前保存部分正文、`failed` 和结构化 `error_code`。客户端中断或外层生成器关闭时保存 `cancelled`。
 
@@ -88,7 +90,7 @@ S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cook
 
 同一会话的并发发送通过 PostgreSQL 行锁串行分配消息顺序，提交用户消息后立即释放锁，不在模型流期间持有数据库事务。这样既避免 sequence 冲突，也避免慢模型长期占用锁。
 
-当前没有身份认证，会话列表不会按用户过滤；`owner_id` 也不构成授权。这些接口只能用于当前受控开发阶段，不能在完成 S5-1 前作为多用户安全接口开放。
+阶段二初版没有身份认证；S5-1 起所有会话接口都按 Cookie 身份过滤，`owner_id` 已用于授权。页面当前只使用唯一窗口接口，旧多会话路由暂供旧版客户端兼容。
 
 `POST /api/v1/conversations/messages:stream` 接受：
 
@@ -124,3 +126,7 @@ S5-1 增加 `principals`（游客/账号）和 `identity_sessions`（随机 Cook
 ## 后续阶段
 
 后续按“对话链路稳定性 → 会话与消息持久化 → 前端历史会话体验 → 模型上下文管理 → 开放使用前的运行保障”推进。测试随开发同步进行，身份与归属校验等保障在向其他用户开放前完成。详细任务、验收要求和进度见 [对话功能开发规划与进度](conversation-roadmap.md)，设计原因和前后端实现见 [技术难点与解决方案](conversation-technical-decisions.md)。每完成一个任务，同步更新两份文档及受影响的当前架构说明。语音、知识库和长期记忆另行规划。
+
+## 当前单窗口行为（2026-11-25）
+
+`GET /api/v1/conversations/current` 由 Cookie 身份取得或原子创建唯一当前窗口；`DELETE /api/v1/conversations/current/messages` 在行锁事务中清空该身份消息和摘要，保留内部模型调用记录。`0006_single_window` 迁移合并同身份旧会话并建立条件唯一索引。登录与退出只切换身份窗口，不导入游客消息。前端页头管理身份，`use-current-conversation.ts` 处理唯一窗口的消息恢复、SSE、分页与清空；旧多会话路由暂供旧版客户端兼容。更完整的并发与迁移说明见 [技术难点文档](conversation-technical-decisions.md)。
