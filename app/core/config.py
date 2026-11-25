@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_reasoning_effort: Literal["low", "high", "max"] = "low"
+    # 按当前接入模型填写；默认采用较小窗口，避免更换模型时沿用过大的预算。
+    llm_context_window_tokens: int = Field(default=32768, gt=0)
+    llm_max_output_tokens: int = Field(default=4096, gt=0)
+    llm_token_safety_margin: int = Field(default=1024, ge=0)
+
+    @model_validator(mode="after")
+    def validate_token_budget(self) -> "Settings":
+        """确保系统提示与当前问题至少有输入空间。"""
+        if self.llm_max_output_tokens + self.llm_token_safety_margin >= self.llm_context_window_tokens:
+            raise ValueError("LLM 输出预留和安全余量必须小于上下文窗口")
+        return self
 
     def active_database_url(self) -> str:
         """根据运行环境选择数据库地址，仅在建立连接时取出真实字符串。"""

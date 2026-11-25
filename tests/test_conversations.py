@@ -6,11 +6,36 @@ import httpx
 
 from app.conversations.models import Message, MessageRole, MessageStatus
 from app.conversations.schemas import StreamMessageRequest
-from app.conversations.service import INTERRUPTED_SUFFIX, build_database_history, stream_conversation
+from app.conversations.service import (
+    INTERRUPTED_SUFFIX, build_database_history, current_input_tokens,
+    estimate_message_tokens, stream_conversation,
+)
 from app.llm.demo import DemoLLMProvider
 
 
 class ConversationTests(unittest.TestCase):
+    def test_token_budget_keeps_recent_complete_turns(self) -> None:
+        messages = [
+            Message(role=role, content=content, status=MessageStatus.COMPLETED.value)
+            for role, content in (
+                (MessageRole.USER.value, "较早问题"),
+                (MessageRole.ASSISTANT.value, "较早回答"),
+                (MessageRole.USER.value, "最近问题"),
+                (MessageRole.ASSISTANT.value, "最近回答"),
+            )
+        ]
+        recent_cost = estimate_message_tokens("最近问题") + estimate_message_tokens("最近回答")
+        history = build_database_history(
+            messages,
+            token_budget=current_input_tokens("新问题") + recent_cost,
+            current_message="新问题",
+        )
+        self.assertEqual([item.content for item in history], ["最近问题", "最近回答"])
+
+    def test_current_question_over_budget_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "当前问题超过模型输入预算"):
+            build_database_history([], token_budget=current_input_tokens("短"), current_message="较长问题")
+
     def test_database_history_keeps_whole_turns_and_marks_interruption(self) -> None:
         messages: list[Message] = []
         for turn in range(11):

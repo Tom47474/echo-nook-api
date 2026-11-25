@@ -12,6 +12,7 @@ from app.conversations.models import (
     MessageRole,
     MessageStatus,
 )
+from app.conversations.service import current_input_tokens
 from app.core.config import Settings
 from app.main import create_app, lifespan
 
@@ -250,6 +251,23 @@ class ConversationApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"]["code"], "conversation_not_found")
+
+    async def test_over_budget_question_does_not_create_messages(self) -> None:
+        conversation = await self.create_conversation("超长输入")
+        settings = self.app.state.settings
+        budget = current_input_tokens("这条问题会超限") - 1
+        self.app.state.settings = settings.model_copy(update={
+            "llm_context_window_tokens": settings.llm_max_output_tokens
+            + settings.llm_token_safety_margin + budget,
+        })
+        response = await self.client.post(
+            f"/api/v1/conversations/{conversation['id']}/messages:stream",
+            json={"message": "这条问题会超限"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"]["code"], "input_budget_exceeded")
+        stored = await self.client.get(f"/api/v1/conversations/{conversation['id']}/messages")
+        self.assertEqual(stored.json()["items"], [])
 
     async def test_concurrent_user_messages_receive_unique_sequences(self) -> None:
         conversation = await self.create_conversation("并发顺序")

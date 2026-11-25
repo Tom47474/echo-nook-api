@@ -93,7 +93,7 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 }
 ```
 
-响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。
+响应的 `Content-Type` 是 `text/event-stream`。服务端依次返回 `message.delta` 事件及一个 `message.completed` 事件；生成失败时返回 `message.failed`，不会再发送 `completed`。前端用 `fetch` 的流读取器解析事件。历史最多 20 条，每条消息和本次输入最多 4000 字符。S4-1 进一步按可配置窗口、输出预留和安全余量控制估算输入预算；单独超预算的本次问题在写库前返回 422 `input_budget_exceeded`。方舟请求显式设置 `max_tokens`；实际 token 用量目前尚未采集。
 
 当前前端 `http-reply-provider.ts` 只向带会话 ID 的接口提交本次 `message`，不再提交 `history`。服务端从数据库选择最多 20 条历史并处理失败或取消回复的中断标记。用户停止或切换会话时，前端会取消 HTTP 请求。
 
@@ -110,7 +110,7 @@ HTTP 路由       → 请求级 AsyncSession ───────────�
 ## 使用火山方舟模型
 
 1. 在仓库根目录的 `.env` 中配置 `LLM_PROVIDER=openai_compatible`、`LLM_API_KEY`、`LLM_API_BASE_URL`、`LLM_MODEL` 和 `LLM_REASONING_EFFORT`。密钥只写入服务端 `.env`。
-2. `LLM_MODEL` 没有代码默认值，必须在 `.env` 中填写。当前本机使用 `kimi-k3-1-pro-261024`，已通过实际流式请求验证。切换模型时修改这个配置为其他可用模型 ID 或接入点 ID，然后重启服务端；无需修改 Python 代码。
+2. `LLM_MODEL` 没有代码默认值，必须在 `.env` 中填写。当前本机使用 `kimi-k3-1-pro-261024`，已通过实际流式请求验证。切换模型时修改这个配置为其他可用模型 ID 或接入点 ID，并核对 `LLM_CONTEXT_WINDOW_TOKENS`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_TOKEN_SAFETY_MARGIN`，然后重启服务端；无需修改 Python 代码。
 3. `app/llm/openai_compatible.py` 发送系统提示词和历史消息，逐段读取方舟 SSE，只输出 `delta.content`；`app/conversations/service.py` 将其包装成前端统一事件。
 
 密钥缺失、鉴权失败、模型不可用或上游调用失败时，统一事件流返回 `message.failed`。不要在代码或前端仓库中提交真实密钥。删除 `.env` 后，代码默认使用演示模型。

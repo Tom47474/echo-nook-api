@@ -20,14 +20,35 @@ def encode_event(name: str, data: dict[str, str]) -> str:
 
 
 INTERRUPTED_SUFFIX = "\n\n[系统注记：这条回复未完整生成。]"
+MESSAGE_OVERHEAD_TOKENS = 16
+
+
+def estimate_message_tokens(content: str) -> int:
+    """用 UTF-8 字节数加消息包装余量做保守估算；不是供应商实际 token 用量。"""
+    return len(content.encode("utf-8")) + MESSAGE_OVERHEAD_TOKENS
+
+
+def input_token_budget(context_window: int, max_output: int, safety_margin: int) -> int:
+    """预留模型输出及估算误差，返回本次完整输入允许使用的预算。"""
+    return context_window - max_output - safety_margin
+
+
+def current_input_tokens(message: str) -> int:
+    """系统提示和当前问题必须先占用预算，历史只能使用剩余部分。"""
+    return estimate_message_tokens(SYSTEM_PROMPT) + estimate_message_tokens(message)
 
 
 def build_database_history(
     messages: Sequence[Message],
     *,
     max_messages: int = 20,
+    token_budget: int | None = None,
+    current_message: str = "",
 ) -> list[ChatMessage]:
-    """把数据库消息整理为完整回合，并限制为模型可接收的最近 20 条。"""
+    """按完整回合选择最近历史，同时限制消息条数和估算输入预算。"""
+    remaining = token_budget - current_input_tokens(current_message) if token_budget is not None else None
+    if remaining is not None and remaining < 0:
+        raise ValueError("当前问题超过模型输入预算")
     turns: list[list[Message]] = []
     current_turn: list[Message] = []
     for message in messages:
@@ -59,8 +80,14 @@ def build_database_history(
             context_turn.append(ChatMessage(role="assistant", content=content))
         if count + len(context_turn) > max_messages:
             break
+        turn_tokens = sum(estimate_message_tokens(item.content) for item in context_turn)
+        if remaining is not None and turn_tokens > remaining:
+            # 旧回合不能拆开纳入；更旧内容也不越过这个回合重新挑选。
+            break
         selected.insert(0, context_turn)
         count += len(context_turn)
+        if remaining is not None:
+            remaining -= turn_tokens
     return [message for turn in selected for message in turn]
 
 

@@ -73,6 +73,11 @@ DELETE /api/v1/conversations/{id}
 | `LLM_API_KEY` | 火山方舟 API Key，只放在服务端 `.env`。 |
 | `LLM_MODEL` | 要调用的模型 ID 或推理接入点 ID，必须在 `.env` 中填写；代码不预设模型名称。 |
 | `LLM_REASONING_EFFORT` | `low`、`high` 或 `max`；默认 `low`，适合交互式聊天。 |
+| `LLM_CONTEXT_WINDOW_TOKENS` | 当前模型的上下文窗口，默认保守使用 `32768`；切换模型时按供应商资料核对。 |
+| `LLM_MAX_OUTPUT_TOKENS` | 为回答（含可能的思考过程）预留并传给模型的 `max_tokens`，默认 `4096`。 |
+| `LLM_TOKEN_SAFETY_MARGIN` | 输入估算误差的安全余量，默认 `1024`。 |
+
+S4-1 使用 `上下文窗口 - 最大输出 - 安全余量` 作为输入预算，先扣除系统提示词和本次问题，再从近到远按完整回合选择历史。发送前按 UTF-8 字节数及每条消息 16 token 的包装余量保守估算；它不是供应商真实分词结果，极端内容仍可能被上游拒绝。本次问题单独超预算会返回 422 `input_budget_exceeded`，不会创建消息。实际用量读取和记录属于 S4-4。
 
 使用 `openai_compatible` 时，适配器调用方舟的 `/chat/completions` 流式接口，只转发回答正文，不将模型的思考内容展示给前端。代码默认值为 `demo`，未显式设置 `LLM_PROVIDER` 时会使用演示回复；即使配置了 API Key 和模型 ID，只要 Provider 仍是 `demo`，也不会调用真实模型。不要提交 `.env` 或在日志中打印密钥。
 

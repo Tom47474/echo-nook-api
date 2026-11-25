@@ -15,7 +15,9 @@ from app.conversations.schemas import (
     MessagePage,
     StreamMessageRequest,
 )
-from app.conversations.service import build_database_history, stream_conversation
+from app.conversations.service import (
+    build_database_history, current_input_tokens, input_token_budget, stream_conversation,
+)
 from app.core.config import Settings
 from app.core.dependencies import get_app_settings
 from app.db.dependencies import get_database_manager, get_db_session
@@ -125,6 +127,17 @@ async def stream_conversation_message(
     settings: Settings = Depends(get_app_settings),
 ) -> StreamingResponse:
     """创建完整回合、加载数据库历史，并持久化助手流式状态。"""
+    # 在写入回合之前校验当前问题；过长输入不能留下无法生成的占位消息。
+    budget = input_token_budget(
+        settings.llm_context_window_tokens,
+        settings.llm_max_output_tokens,
+        settings.llm_token_safety_margin,
+    )
+    if current_input_tokens(request.message) > budget:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "input_budget_exceeded", "message": "当前问题超过模型输入预算，请缩短后重试"},
+        )
     repository = ConversationRepository(session)
     turn = await repository.start_turn(
         conversation_id,
@@ -147,7 +160,9 @@ async def stream_conversation_message(
         conversation_id,
         before_sequence=user_sequence,
     )
-    history = build_database_history(stored_history)
+    history = build_database_history(
+        stored_history, token_budget=budget, current_message=request.message,
+    )
     # SELECT 会自动开启只读事务；模型流开始前显式结束它，避免慢模型长时间
     # 占用 PostgreSQL 连接。Session 本身稍后仍由依赖统一关闭。
     await session.rollback()

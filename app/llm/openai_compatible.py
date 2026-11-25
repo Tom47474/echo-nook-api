@@ -32,6 +32,8 @@ class OpenAICompatibleProvider:
             "model": self.settings.llm_model,
             "stream": True,
             "reasoning_effort": self.settings.llm_reasoning_effort,
+            # 显式限制输出，和业务层预留的 token 空间保持一致。
+            "max_tokens": self.settings.llm_max_output_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 *[{"role": item.role, "content": item.content} for item in messages],

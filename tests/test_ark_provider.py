@@ -53,6 +53,7 @@ class ArkProviderTests(unittest.TestCase):
         payload = json.loads(captured[0].content)
         self.assertEqual(payload["model"], "test-model-id")
         self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["max_tokens"], settings.llm_max_output_tokens)
         self.assertEqual(payload["messages"][0], {"role": "system", "content": "be helpful"})
 
     def test_missing_key_fails_before_request(self) -> None:
